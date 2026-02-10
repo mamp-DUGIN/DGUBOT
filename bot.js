@@ -3,23 +3,36 @@ const { Telegraf, Markup } = require("telegraf");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const bot = new Telegraf(BOT_TOKEN);
 
-// ====== ХРАНИЛИЩЕ (в памяти) ======
-const users = {};      // userId -> анкета
-const likes = {};      // userId -> Set
-const likedBy = {};    // userId -> Set
-const state = {};      // userId -> шаг регистрации
+// ====== ХРАНИЛИЩЕ (in-memory) ======
+const users = {};      // userId -> profile
+const likes = {};      // userId -> Set(userId)
+const likedBy = {};    // userId -> Set(userId)
+const state = {};      // userId -> registration step
 
-// ====== START ======
+// ====== КЛАВИАТУРЫ ======
+const mainMenu = Markup.keyboard([
+  ["🔍 Смотреть анкеты"],
+  ["👀 Кто меня лайкнул"],
+  ["👤 Моя анкета"]
+]).resize();
+
+// ====== /start ======
 bot.start((ctx) => {
+  const id = ctx.from.id;
+
+  if (users[id]) {
+    return ctx.reply("С возвращением, философ одиночества 😏", mainMenu);
+  }
+
   ctx.reply(
     "Привет 👋\n" +
-    "Ты в ALEXANDER DUGINчике — пародии на дайвинчик 😏\n" +
-    "Как тебя зовут?"
+    "Ты в ALEXANDER DUGINчике — пародии на дайвинчик.\n\n" +
+    "Начнём регистрацию.\nКак тебя зовут?"
   );
-  state[ctx.from.id] = "name";
+  state[id] = "name";
 });
 
-// ====== ТЕКСТОВЫЕ СООБЩЕНИЯ ======
+// ====== РЕГИСТРАЦИЯ (TEXT) ======
 bot.on("text", (ctx) => {
   const id = ctx.from.id;
   const text = ctx.message.text;
@@ -27,7 +40,6 @@ bot.on("text", (ctx) => {
   if (!state[id]) return;
 
   switch (state[id]) {
-
     case "name":
       users[id] = { name: text };
       ctx.reply("Сколько тебе лет?");
@@ -36,8 +48,7 @@ bot.on("text", (ctx) => {
 
     case "age":
       if (isNaN(text) || Number(text) < 18) {
-        ctx.reply("Только 18+ 🙂");
-        return;
+        return ctx.reply("Только 18+ 🙂");
       }
       users[id].age = Number(text);
       ctx.reply(
@@ -75,14 +86,12 @@ bot.on("text", (ctx) => {
       likedBy[id] = new Set();
       delete state[id];
 
-      ctx.reply(
-        "🔥 Анкета готова!\nНапиши: Смотреть анкеты"
-      );
+      ctx.reply("🔥 Анкета готова!", mainMenu);
       break;
   }
 });
 
-// ====== ФОТО ======
+// ====== РЕГИСТРАЦИЯ (PHOTO) ======
 bot.on("photo", (ctx) => {
   const id = ctx.from.id;
   if (state[id] !== "photo") return;
@@ -92,14 +101,27 @@ bot.on("photo", (ctx) => {
   state[id] = "about";
 });
 
-// ====== ПОКАЗ АНКЕТ ======
-bot.hears("Смотреть анкеты", (ctx) => {
+// ====== МОЯ АНКЕТА ======
+bot.hears("👤 Моя анкета", (ctx) => {
   const id = ctx.from.id;
-  if (!users[id]) return ctx.reply("Сначала зарегистрируйся через /start");
+  const u = users[id];
+  if (!u) return ctx.reply("Анкета не найдена 😢");
+
+  ctx.replyWithPhoto(u.photo, {
+    caption: `${u.name}, ${u.age}\n📍 ${u.city}\n\n${u.about}`
+  });
+});
+
+// ====== ПОИСК АНКЕТ ======
+bot.hears("🔍 Смотреть анкеты", (ctx) => {
+  const id = ctx.from.id;
+
+  if (Object.keys(users).length <= 1) {
+    return ctx.reply("Пока ты здесь один.\nАбсолютная свобода. Абсолютное одиночество.");
+  }
 
   const profiles = Object.entries(users).filter(
-    ([uid]) =>
-      uid != id && !likes[id].has(Number(uid))
+    ([uid]) => uid != id && !likes[id]?.has(Number(uid))
   );
 
   if (!profiles.length) {
@@ -109,19 +131,13 @@ bot.hears("Смотреть анкеты", (ctx) => {
   const [targetId, profile] =
     profiles[Math.floor(Math.random() * profiles.length)];
 
-  ctx.replyWithPhoto(
-    profile.photo,
-    {
-      caption:
-        `${profile.name}, ${profile.age}\n` +
-        `📍 ${profile.city}\n\n` +
-        profile.about,
-      reply_markup: Markup.inlineKeyboard([
-        Markup.button.callback("❤️", `like_${targetId}`),
-        Markup.button.callback("❌", "skip")
-      ])
-    }
-  );
+  ctx.replyWithPhoto(profile.photo, {
+    caption: `${profile.name}, ${profile.age}\n📍 ${profile.city}\n\n${profile.about}`,
+    reply_markup: Markup.inlineKeyboard([
+      Markup.button.callback("❤️ Лайк", `like_${targetId}`),
+      Markup.button.callback("❌ Пропустить", "skip")
+    ])
+  });
 });
 
 // ====== ЛАЙК ======
@@ -133,7 +149,11 @@ bot.action(/like_(.+)/, (ctx) => {
   likedBy[targetId].add(userId);
 
   if (likes[targetId]?.has(userId)) {
-    ctx.telegram.sendMessage(userId, "💘 MATCH! Можно писать 😉");
+    // MATCH
+    likedBy[userId].delete(targetId);
+    likedBy[targetId].delete(userId);
+
+    ctx.telegram.sendMessage(userId, "💘 MATCH! Диалектика сработала 😉");
     ctx.telegram.sendMessage(targetId, "💘 MATCH! Можно писать 😉");
   } else {
     ctx.reply("Лайк отправлен ❤️");
@@ -145,6 +165,43 @@ bot.action(/like_(.+)/, (ctx) => {
 // ====== SKIP ======
 bot.action("skip", (ctx) => {
   ctx.deleteMessage();
+  ctx.answerCbQuery();
+});
+
+// ====== КТО МЕНЯ ЛАЙКНУЛ ======
+bot.hears("👀 Кто меня лайкнул", (ctx) => {
+  const id = ctx.from.id;
+
+  if (!likedBy[id] || likedBy[id].size === 0) {
+    const jokes = [
+      "Пока лайков нет.\nФилософ в изгнании.",
+      "Тишина… где-то плачет один Гегель.",
+      "Инцель-arc активен, но это временно.",
+      "Никто не лайкнул.\nЗато ты лайкнул истину."
+    ];
+    return ctx.reply(jokes[Math.floor(Math.random() * jokes.length)]);
+  }
+
+  const targetId = [...likedBy[id]][0];
+  const p = users[targetId];
+
+  ctx.replyWithPhoto(p.photo, {
+    caption:
+      `👀 Тобой заинтересовались:\n\n${p.name}, ${p.age}\n📍 ${p.city}\n\n${p.about}`,
+    reply_markup: Markup.inlineKeyboard([
+      Markup.button.callback("❤️ Лайкнуть в ответ", `like_${targetId}`),
+      Markup.button.callback("❌ Игнор (одиночество)", `ignore_${targetId}`)
+    ])
+  });
+});
+
+// ====== IGNORE ======
+bot.action(/ignore_(.+)/, (ctx) => {
+  const userId = ctx.from.id;
+  const targetId = Number(ctx.match[1]);
+
+  likedBy[userId].delete(targetId);
+  ctx.reply("Ты выбрал путь одиночки.\nНаблюдай бытие дальше.");
   ctx.answerCbQuery();
 });
 
