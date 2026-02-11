@@ -9,7 +9,7 @@ const state = {};
 const likes = {};
 const likedBy = {};
 
-// ===== ГЛАВНОЕ МЕНЮ =====
+// ===== МЕНЮ =====
 function mainMenu() {
   return Markup.keyboard([
     ["🔍 Смотреть анкеты"],
@@ -19,7 +19,6 @@ function mainMenu() {
   ]).resize();
 }
 
-// ===== МЕНЮ ПРОФИЛЯ =====
 function profileMenu() {
   return Markup.keyboard([
     ["🔄 Заполнить анкету заново"],
@@ -29,16 +28,16 @@ function profileMenu() {
 
 // ===== START =====
 bot.start((ctx) => {
-  return ctx.reply("Главное меню:", mainMenu());
+  ctx.reply("Главное меню:", mainMenu());
 });
 
 // ===== ПОМОЩЬ =====
 bot.hears("ℹ️ Помощь", (ctx) => {
-  return ctx.reply(
+  ctx.reply(
     "Команды:\n" +
     "/start — меню\n" +
-    "/browse — поиск\n" +
-    "/profile — профиль\n\n" +
+    "/profile — профиль\n" +
+    "/broadcast — рассылка (админ)\n\n" +
     "Поддержка: @DjKozyavkin"
   );
 });
@@ -57,7 +56,7 @@ bot.hears("👤 Мой профиль", (ctx) => {
     caption: `${user.name}, ${user.age}\n📍 ${user.city}\n\n${user.about}`
   });
 
-  return ctx.reply("Управление анкетой:", profileMenu());
+  ctx.reply("Управление анкетой:", profileMenu());
 });
 
 bot.hears("🔄 Заполнить анкету заново", (ctx) => {
@@ -66,25 +65,25 @@ bot.hears("🔄 Заполнить анкету заново", (ctx) => {
   delete likes[id];
   delete likedBy[id];
   state[id] = "name";
-  return ctx.reply("Начинаем заново.\nКак тебя зовут?");
+  ctx.reply("Начинаем заново.\nКак тебя зовут?");
 });
 
 bot.hears("❌ Отмена", (ctx) => {
-  return ctx.reply("Главное меню:", mainMenu());
+  ctx.reply("Главное меню:", mainMenu());
 });
 
 // ===== ПОИСК =====
 bot.hears("🔍 Смотреть анкеты", (ctx) => browse(ctx));
 
 function browse(ctx) {
-  const id = ctx.from.id;
+  const id = String(ctx.from.id);
 
   if (!users[id]) {
     return ctx.reply("Сначала создай анкету в разделе «👤 Мой профиль»");
   }
 
   const others = Object.entries(users).filter(
-    ([uid]) => uid != id
+    ([uid]) => uid !== id
   );
 
   if (others.length === 0) {
@@ -94,7 +93,7 @@ function browse(ctx) {
   const [targetId, profile] =
     others[Math.floor(Math.random() * others.length)];
 
-  return ctx.replyWithPhoto(profile.photo, {
+  ctx.replyWithPhoto(profile.photo, {
     caption:
       `${profile.name}, ${profile.age}\n📍 ${profile.city}\n\n${profile.about}`,
     reply_markup: {
@@ -110,23 +109,25 @@ function browse(ctx) {
 
 // ===== ЛАЙК =====
 bot.action(/like_(.+)/, async (ctx) => {
-  const userId = ctx.from.id;
-  const targetId = ctx.match[1];
+  const userId = String(ctx.from.id);
+  const targetId = String(ctx.match[1]);
+
+  if (userId === targetId) {
+    return ctx.answerCbQuery("Самого себя нельзя лайкнуть 😅");
+  }
 
   if (!likes[userId]) likes[userId] = new Set();
   if (!likedBy[targetId]) likedBy[targetId] = new Set();
 
+  if (likes[userId].has(targetId)) {
+    return ctx.answerCbQuery("Ты уже лайкал этого человека ❤️");
+  }
+
   likes[userId].add(targetId);
-  likedBy[targetId].add(String(userId));
+  likedBy[targetId].add(userId);
 
-  // Уведомление
-  await ctx.telegram.sendMessage(
-    targetId,
-    "❤️ Тебя кто-то лайкнул!\nЗайди в «Кто меня лайкнул»"
-  );
-
-  // Проверка матча
-  if (likes[targetId] && likes[targetId].has(String(userId))) {
+  // MATCH
+  if (likes[targetId] && likes[targetId].has(userId)) {
 
     const username1 = ctx.from.username
       ? `@${ctx.from.username}`
@@ -146,14 +147,19 @@ bot.action(/like_(.+)/, async (ctx) => {
       targetId,
       `💘 У ВАС МАТЧ!\nЮзернейм: ${username1}`
     );
-  } else {
-    ctx.reply("Лайк отправлен ❤️");
-  }
 
-  ctx.answerCbQuery();
+  } else {
+
+    await ctx.telegram.sendMessage(
+      targetId,
+      "❤️ Тебя кто-то лайкнул!\nЗайди в «Кто меня лайкнул»"
+    );
+
+    ctx.answerCbQuery("Лайк отправлен ❤️");
+  }
 });
 
-// ===== ПРОПУСТИТЬ =====
+// ===== СКИП В ПОИСКЕ =====
 bot.action("skip", (ctx) => {
   ctx.deleteMessage();
   ctx.answerCbQuery();
@@ -161,7 +167,11 @@ bot.action("skip", (ctx) => {
 
 // ===== КТО МЕНЯ ЛАЙКНУЛ =====
 bot.hears("❤️ Кто меня лайкнул", (ctx) => {
-  const id = ctx.from.id;
+  showNextLiker(ctx);
+});
+
+function showNextLiker(ctx) {
+  const id = String(ctx.from.id);
 
   if (!likedBy[id] || likedBy[id].size === 0) {
     return ctx.reply("Пока никто не лайкнул 😔");
@@ -171,20 +181,38 @@ bot.hears("❤️ Кто меня лайкнул", (ctx) => {
   const profile = users[likerId];
 
   if (!profile) {
-    return ctx.reply("Ошибка анкеты.");
+    likedBy[id].delete(likerId);
+    return showNextLiker(ctx);
   }
 
-  return ctx.replyWithPhoto(profile.photo, {
+  ctx.replyWithPhoto(profile.photo, {
     caption:
       `Тебя лайкнул:\n\n${profile.name}, ${profile.age}\n📍 ${profile.city}\n\n${profile.about}`,
     reply_markup: {
       inline_keyboard: [
         [
           { text: "❤️ Лайкнуть в ответ", callback_data: `like_${likerId}` }
+        ],
+        [
+          { text: "❌ Скипнуть", callback_data: `skip_liker_${likerId}` }
         ]
       ]
     }
   });
+}
+
+bot.action(/skip_liker_(.+)/, (ctx) => {
+  const userId = String(ctx.from.id);
+  const likerId = ctx.match[1];
+
+  if (likedBy[userId]) {
+    likedBy[userId].delete(likerId);
+  }
+
+  ctx.deleteMessage();
+  ctx.answerCbQuery();
+
+  showNextLiker(ctx);
 });
 
 // ===== РАССЫЛКА =====
@@ -194,17 +222,17 @@ bot.command("broadcast", (ctx) => {
   }
 
   state[ctx.from.id] = "broadcast";
-  return ctx.reply("Введите текст для рассылки:");
+  ctx.reply("Введите текст для рассылки:");
 });
 
 // ===== ОБРАБОТКА ТЕКСТА =====
 bot.on("text", async (ctx) => {
-  const id = ctx.from.id;
+  const id = String(ctx.from.id);
   const text = ctx.message.text;
 
-  // Рассылка
+  // РАССЫЛКА
   if (state[id] === "broadcast") {
-    if (id !== ADMIN_ID) return;
+    if (Number(id) !== ADMIN_ID) return;
 
     let sent = 0;
 
@@ -236,7 +264,7 @@ bot.on("text", async (ctx) => {
       }
       users[id].age = text;
       state[id] = "city";
-      return ctx.reply("Из какого ты города?");
+      return ctx.reply("Москва или Село?");
 
     case "city":
       users[id].city = text;
@@ -252,14 +280,15 @@ bot.on("text", async (ctx) => {
 
 // ===== ФОТО =====
 bot.on("photo", (ctx) => {
-  const id = ctx.from.id;
+  const id = String(ctx.from.id);
+
   if (state[id] !== "photo") return;
 
   users[id].photo = ctx.message.photo.pop().file_id;
   delete state[id];
 
-  return ctx.reply("Анкета сохранена ✅", mainMenu());
+  ctx.reply("Анкета сохранена ✅", mainMenu());
 });
 
 bot.launch();
-console.log("Бот полностью запущен 🚀");
+console.log("DUGINчик полностью запущен 🚀");
