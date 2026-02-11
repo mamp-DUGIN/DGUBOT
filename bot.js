@@ -1,56 +1,80 @@
 const { Telegraf, Markup } = require("telegraf");
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-
+const bot = new Telegraf("YOUR_BOT_TOKEN"); // <-- вставь токен
 const ADMIN_ID = 2007502528;
 
-const users = {};
-const state = {};
-const likes = {};
-const likedBy = {};
+const START_PHOTO = "https://i.postimg.cc/zf5hCDHg/424242142141.png";
+const HELP_PHOTO = "https://i.postimg.cc/3xkSsBt7/pozdnyakov.png";
 
-// ===== МЕНЮ =====
+let users = {};
+let state = {};
+let likes = {};
+let likedBy = {};
+let browsing = {};
+let viewingLikes = {};
+let broadcastMode = false;
+
 function mainMenu() {
   return Markup.keyboard([
-    ["🔍 Смотреть анкеты"],
-    ["❤️ Кто меня лайкнул"],
+    ["🔍 Поиск"],
     ["👤 Мой профиль"],
+    ["❤️ Кто меня лайкнул"],
     ["ℹ️ Помощь"]
   ]).resize();
 }
 
 function profileMenu() {
   return Markup.keyboard([
-    ["🔄 Заполнить анкету заново"],
-    ["❌ Отмена"]
+    ["🔄 Заполнить заново"],
+    ["⬅️ Назад"]
   ]).resize();
 }
 
-// ===== START =====
 bot.start((ctx) => {
-  ctx.reply("Добро пожаловать в ALEXANDER DUGINчик 😈\n\nГлавное меню:", mainMenu());
+  state[ctx.from.id] = null;
+  ctx.replyWithPhoto(START_PHOTO, {
+    caption: "Добро пожаловать в ALEXANDER DUGINчик 😈",
+    reply_markup: mainMenu().reply_markup
+  });
 });
 
-// ===== ПОМОЩЬ =====
+bot.command("profile", (ctx) => {
+  showProfile(ctx);
+});
+
+bot.command("broadcast", (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  broadcastMode = true;
+  ctx.reply("Введи текст для рассылки:");
+});
+
 bot.hears("ℹ️ Помощь", (ctx) => {
-  ctx.reply(
-    "Команды:\n" +
-    "/start — меню\n" +
-    "/profile — профиль\n" +
-    "/broadcast — рассылка (админ)\n\n" +
-    "Регистрация 14+\n\n" +
-    "Поддержка: @DjKozyavkin"
-  );
+  ctx.replyWithPhoto(HELP_PHOTO, {
+    caption:
+      "/start — меню\n" +
+      "/profile — профиль\n\n" +
+      "Регистрация 14+\n" +
+      "Поддержка: @DjKozyavkin"
+  });
 });
 
-// ===== ПРОФИЛЬ =====
 bot.hears("👤 Мой профиль", (ctx) => {
-  const id = String(ctx.from.id);
-  const user = users[id];
+  ctx.reply("Меню профиля:", profileMenu());
+});
 
+bot.hears("⬅️ Назад", (ctx) => {
+  ctx.reply("Главное меню:", mainMenu());
+});
+
+bot.hears("🔄 Заполнить заново", (ctx) => {
+  state[ctx.from.id] = "name";
+  ctx.reply("Введите имя:");
+});
+
+function showProfile(ctx) {
+  const user = users[ctx.from.id];
   if (!user) {
-    state[id] = "name";
-    return ctx.reply("У тебя нет анкеты.\nКак тебя зовут?");
+    return ctx.reply("У тебя нет анкеты. Нажми «Заполнить заново»");
   }
 
   ctx.replyWithPhoto(user.photo, {
@@ -60,225 +84,171 @@ bot.hears("👤 Мой профиль", (ctx) => {
       `${user.city}\n\n` +
       `${user.about}`
   });
+}
 
-  ctx.reply("Управление анкетой:", profileMenu());
+bot.hears("🔍 Поиск", (ctx) => {
+  if (!users[ctx.from.id]) {
+    return ctx.reply("Сначала создай анкету 👤");
+  }
+  showNextProfile(ctx);
 });
 
-bot.hears("🔄 Заполнить анкету заново", (ctx) => {
-  const id = String(ctx.from.id);
-  delete users[id];
-  delete likes[id];
-  delete likedBy[id];
-  state[id] = "name";
-  ctx.reply("Начинаем заново.\nКак тебя зовут?");
+function showNextProfile(ctx) {
+  const id = ctx.from.id;
+  const list = Object.keys(users).filter(
+    uid =>
+      uid != id &&
+      (!likes[id] || !likes[id].includes(uid))
+  );
+
+  if (!list.length) {
+    return ctx.reply("Анкеты закончились 😢");
+  }
+
+  const target = list[Math.floor(Math.random() * list.length)];
+  browsing[id] = target;
+
+  const profile = users[target];
+
+  ctx.replyWithPhoto(profile.photo, {
+    caption:
+      `${profile.name}, ${profile.age}\n` +
+      `${profile.type}\n` +
+      `${profile.city}\n\n` +
+      `${profile.about}`,
+    ...Markup.keyboard([
+      ["❤️ Лайк", "⏭ Скип"],
+      ["⬅️ Назад"]
+    ]).resize()
+  });
+}
+
+bot.hears("❤️ Лайк", (ctx) => {
+  const from = ctx.from.id;
+  const to = browsing[from];
+  if (!to) return;
+
+  if (!likes[from]) likes[from] = [];
+  if (likes[from].includes(to)) {
+    return ctx.reply("Ты уже лайкал этого человека");
+  }
+
+  likes[from].push(to);
+
+  if (!likedBy[to]) likedBy[to] = [];
+  likedBy[to].push(from);
+
+  ctx.telegram.sendMessage(
+    to,
+    "🔥 Кто-то лайкнул тебя!\nЗайди в «Кто меня лайкнул»"
+  );
+
+  if (likes[to] && likes[to].includes(String(from))) {
+    ctx.reply(
+      `💖 МЕТЧ!\nВот его username: @${ctx.from.username || "без username"}`
+    );
+
+    ctx.telegram.sendMessage(
+      to,
+      `💖 МЕТЧ!\nВот его username: @${ctx.from.username || "без username"}`
+    );
+  }
+
+  showNextProfile(ctx);
 });
 
-bot.hears("❌ Отмена", (ctx) => {
+bot.hears("⏭ Скип", (ctx) => {
+  showNextProfile(ctx);
+});
+
+bot.hears("❤️ Кто меня лайкнул", (ctx) => {
+  const id = ctx.from.id;
+  if (!likedBy[id] || !likedBy[id].length) {
+    return ctx.reply("Пока никто не лайкал 😔");
+  }
+
+  const liker = likedBy[id].shift();
+  viewingLikes[id] = liker;
+
+  const profile = users[liker];
+
+  ctx.replyWithPhoto(profile.photo, {
+    caption:
+      `${profile.name}, ${profile.age}\n` +
+      `${profile.type}\n` +
+      `${profile.city}\n\n` +
+      `${profile.about}`,
+    ...Markup.keyboard([
+      ["❤️ Ответить лайком", "❌ Скип"],
+      ["⬅️ Назад"]
+    ]).resize()
+  });
+});
+
+bot.hears("❤️ Ответить лайком", (ctx) => {
+  const from = ctx.from.id;
+  const to = viewingLikes[from];
+  if (!to) return;
+
+  if (!likes[from]) likes[from] = [];
+  if (!likes[from].includes(to)) {
+    likes[from].push(to);
+  }
+
+  ctx.reply(
+    `💖 МЕТЧ!\nВот его username: @${users[to].username || "без username"}`
+  );
+
+  ctx.telegram.sendMessage(
+    to,
+    `💖 МЕТЧ!\nВот его username: @${ctx.from.username || "без username"}`
+  );
+
+  showNextProfile(ctx);
+});
+
+bot.hears("❌ Скип", (ctx) => {
+  ctx.reply("Ок, пропустили");
   ctx.reply("Главное меню:", mainMenu());
 });
 
-// ===== ПОИСК =====
-bot.hears("🔍 Смотреть анкеты", (ctx) => browse(ctx));
+bot.on("photo", (ctx) => {
+  if (state[ctx.from.id] === "photo") {
+    const fileId = ctx.message.photo.pop().file_id;
+    users[ctx.from.id].photo = fileId;
+    users[ctx.from.id].username = ctx.from.username;
+    state[ctx.from.id] = null;
 
-function browse(ctx) {
-  const id = String(ctx.from.id);
-
-  if (!users[id]) {
-    return ctx.reply("Сначала создай анкету в разделе «👤 Мой профиль»");
-  }
-
-  const others = Object.entries(users).filter(
-    ([uid]) => uid !== id
-  );
-
-  if (others.length === 0) {
-    return ctx.reply("Пока нет других анкет 😔");
-  }
-
-  const [targetId, profile] =
-    others[Math.floor(Math.random() * others.length)];
-
-  ctx.replyWithPhoto(profile.photo, {
-    caption:
-      `${profile.name}, ${profile.age}\n` +
-      `${profile.type}\n` +
-      `${profile.city}\n\n` +
-      `${profile.about}`,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "❤️ Лайк", callback_data: `like_${targetId}` },
-          { text: "❌ Пропустить", callback_data: "skip" }
-        ]
-      ]
-    }
-  });
-}
-
-// ===== ЛАЙК =====
-bot.action(/like_(.+)/, async (ctx) => {
-  const userId = String(ctx.from.id);
-  const targetId = String(ctx.match[1]);
-
-  if (userId === targetId) {
-    return ctx.answerCbQuery("Самого себя нельзя лайкнуть 😅");
-  }
-
-  if (!likes[userId]) likes[userId] = new Set();
-  if (!likedBy[targetId]) likedBy[targetId] = new Set();
-
-  if (likes[userId].has(targetId)) {
-    return ctx.answerCbQuery("Ты уже лайкал этого человека ❤️");
-  }
-
-  likes[userId].add(targetId);
-  likedBy[targetId].add(userId);
-
-  // MATCH
-  if (likes[targetId] && likes[targetId].has(userId)) {
-
-    const username1 = ctx.from.username
-      ? `@${ctx.from.username}`
-      : "Юзернейм не указан";
-
-    const chat = await ctx.telegram.getChat(targetId);
-    const username2 = chat.username
-      ? `@${chat.username}`
-      : "Юзернейм не указан";
-
-    await ctx.telegram.sendMessage(
-      userId,
-      `💘 У ВАС МАТЧ!\nЮзернейм: ${username2}`
-    );
-
-    await ctx.telegram.sendMessage(
-      targetId,
-      `💘 У ВАС МАТЧ!\nЮзернейм: ${username1}`
-    );
-
-  } else {
-
-    await ctx.telegram.sendMessage(
-      targetId,
-      "🔥 Кто-то признал твоё величие.\nПроверь «Кто меня лайкнул»"
-    );
-
-    ctx.answerCbQuery("Лайк отправлен ❤️");
+    ctx.reply("Анкета создана ✅", mainMenu());
   }
 });
 
-// ===== СКИП В ПОИСКЕ =====
-bot.action("skip", (ctx) => {
-  ctx.deleteMessage();
-  ctx.answerCbQuery();
-});
-
-// ===== КТО МЕНЯ ЛАЙКНУЛ =====
-bot.hears("❤️ Кто меня лайкнул", (ctx) => {
-  showNextLiker(ctx);
-});
-
-function showNextLiker(ctx) {
-  const id = String(ctx.from.id);
-
-  if (!likedBy[id] || likedBy[id].size === 0) {
-    return ctx.reply("Пока никто не лайкнул 😔");
-  }
-
-  const likerId = [...likedBy[id]][0];
-  const profile = users[likerId];
-
-  if (!profile) {
-    likedBy[id].delete(likerId);
-    return showNextLiker(ctx);
-  }
-
-  ctx.replyWithPhoto(profile.photo, {
-    caption:
-      `Тебя лайкнул:\n\n` +
-      `${profile.name}, ${profile.age}\n` +
-      `${profile.type}\n` +
-      `${profile.city}\n\n` +
-      `${profile.about}`,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "❤️ Лайкнуть в ответ", callback_data: `like_${likerId}` }
-        ],
-        [
-          { text: "❌ Скипнуть", callback_data: `skip_liker_${likerId}` }
-        ]
-      ]
-    }
-  });
-}
-
-bot.action(/skip_liker_(.+)/, (ctx) => {
-  const userId = String(ctx.from.id);
-  const likerId = ctx.match[1];
-
-  if (likedBy[userId]) {
-    likedBy[userId].delete(likerId);
-  }
-
-  ctx.deleteMessage();
-  ctx.answerCbQuery();
-
-  showNextLiker(ctx);
-});
-
-// ===== РАССЫЛКА =====
-bot.command("broadcast", (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("У тебя нет доступа.");
-  }
-
-  state[ctx.from.id] = "broadcast";
-  ctx.reply("Введите текст для рассылки:");
-});
-
-// ===== ОБРАБОТКА ТЕКСТА =====
-bot.on("text", async (ctx) => {
-  const id = String(ctx.from.id);
+bot.on("text", (ctx) => {
+  const id = ctx.from.id;
   const text = ctx.message.text;
 
-  // РАССЫЛКА
-  if (state[id] === "broadcast") {
-    if (Number(id) !== ADMIN_ID) return;
-
-    let sent = 0;
-
-    for (const userId of Object.keys(users)) {
-      try {
-        await ctx.telegram.sendMessage(
-          userId,
-          "📢 Обновление:\n\n" + text
-        );
-        sent++;
-      } catch (e) {}
-    }
-
-    delete state[id];
-    return ctx.reply(`Рассылка завершена.\nОтправлено: ${sent}`);
+  if (broadcastMode && id === ADMIN_ID) {
+    Object.keys(users).forEach(uid => {
+      ctx.telegram.sendMessage(uid, text);
+    });
+    broadcastMode = false;
+    return ctx.reply("Рассылка отправлена ✅");
   }
 
-  if (!state[id]) return;
-
   switch (state[id]) {
-
     case "name":
       users[id] = { name: text };
       state[id] = "age";
-      return ctx.reply("Сколько тебе лет?");
+      return ctx.reply("Возраст?");
 
     case "age":
       if (isNaN(text) || text < 14) {
-        return ctx.reply("Регистрация доступна с 14 лет.");
+        return ctx.reply("Регистрация с 14 лет.");
       }
       users[id].age = text;
       state[id] = "type";
       return ctx.reply(
-        "Выбери свой путь:",
+        "Выбери тип:",
         Markup.keyboard([
           ["🧔 Инцел"],
           ["👩 Фемцел"]
@@ -286,13 +256,10 @@ bot.on("text", async (ctx) => {
       );
 
     case "type":
-      if (text !== "🧔 Инцел" && text !== "👩 Фемцел") {
-        return ctx.reply("Выбери кнопку 😈");
-      }
       users[id].type = text;
       state[id] = "city";
       return ctx.reply(
-        "Где ты обитаешь?",
+        "Москва или Село?",
         Markup.keyboard([
           ["🏙 Москва"],
           ["🌾 Село"]
@@ -302,26 +269,13 @@ bot.on("text", async (ctx) => {
     case "city":
       users[id].city = text;
       state[id] = "about";
-      return ctx.reply("Опиши себя:");
+      return ctx.reply("О себе:");
 
     case "about":
       users[id].about = text;
       state[id] = "photo";
-      return ctx.reply("Отправь фото:");
+      return ctx.reply("Пришли фото:");
   }
 });
 
-// ===== ФОТО =====
-bot.on("photo", (ctx) => {
-  const id = String(ctx.from.id);
-
-  if (state[id] !== "photo") return;
-
-  users[id].photo = ctx.message.photo.pop().file_id;
-  delete state[id];
-
-  ctx.reply("Анкета сохранена ✅", mainMenu());
-});
-
 bot.launch();
-console.log("DUGINчик полностью запущен 🚀");
