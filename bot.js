@@ -1,6 +1,6 @@
 const { Telegraf, Markup } = require("telegraf");
 
-const bot = new Telegraf(process.env.BOT_TOKEN); // <-- вставь токен
+const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = 2007502528;
 
 const START_PHOTO = "https://i.postimg.cc/zf5hCDHg/424242142141.png";
@@ -11,8 +11,7 @@ let state = {};
 let likes = {};
 let likedBy = {};
 let browsing = {};
-let viewingLikes = {};
-let broadcastMode = false;
+let lastShown = {};
 
 function mainMenu() {
   return Markup.keyboard([
@@ -31,35 +30,30 @@ function profileMenu() {
 }
 
 bot.start((ctx) => {
-  state[ctx.from.id] = null;
   ctx.replyWithPhoto(START_PHOTO, {
-    caption: "Добро пожаловать в ALEXANDER DUGINчик 😈",
+    caption:
+      "Этот бот создан энтузиастом для любителей мемов.\n" +
+      "Знакомьтесь, общайтесь и получайте матч!",
     reply_markup: mainMenu().reply_markup
   });
 });
 
-bot.command("profile", (ctx) => {
-  showProfile(ctx);
-});
-
-bot.command("broadcast", (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  broadcastMode = true;
-  ctx.reply("Введи текст для рассылки:");
-});
-
-bot.hears("ℹ️ Помощь", (ctx) => {
-  ctx.replyWithPhoto(HELP_PHOTO, {
-    caption:
-      "/start — меню\n" +
-      "/profile — профиль\n\n" +
-      "Регистрация 14+\n" +
-      "Поддержка: @DjKozyavkin"
-  });
-});
-
 bot.hears("👤 Мой профиль", (ctx) => {
-  ctx.reply("Меню профиля:", profileMenu());
+  const user = users[ctx.from.id];
+
+  if (!user) {
+    state[ctx.from.id] = "name";
+    return ctx.reply("У тебя нет анкеты. Введи имя:");
+  }
+
+  ctx.replyWithPhoto(user.photo, {
+    caption:
+      `${user.name}, ${user.age}\n` +
+      `${user.type}\n` +
+      `${user.city}\n\n` +
+      `${user.about}`,
+    reply_markup: profileMenu().reply_markup
+  });
 });
 
 bot.hears("⬅️ Назад", (ctx) => {
@@ -71,42 +65,43 @@ bot.hears("🔄 Заполнить заново", (ctx) => {
   ctx.reply("Введите имя:");
 });
 
-function showProfile(ctx) {
-  const user = users[ctx.from.id];
-  if (!user) {
-    return ctx.reply("У тебя нет анкеты. Нажми «Заполнить заново»");
-  }
-
-  ctx.replyWithPhoto(user.photo, {
+bot.hears("ℹ️ Помощь", (ctx) => {
+  ctx.replyWithPhoto(HELP_PHOTO, {
     caption:
-      `${user.name}, ${user.age}\n` +
-      `${user.type}\n` +
-      `${user.city}\n\n` +
-      `${user.about}`
+      "Команды:\n" +
+      "/start — меню\n\n" +
+      "Регистрация 14+\n" +
+      "Поддержка: @DjKozyavkin"
   });
-}
+});
 
 bot.hears("🔍 Поиск", (ctx) => {
   if (!users[ctx.from.id]) {
-    return ctx.reply("Сначала создай анкету 👤");
+    return ctx.reply("Сначала создай анкету через «Мой профиль»");
   }
+
   showNextProfile(ctx);
 });
 
 function showNextProfile(ctx) {
   const id = ctx.from.id;
-  const list = Object.keys(users).filter(
-    uid =>
-      uid != id &&
-      (!likes[id] || !likes[id].includes(uid))
+
+  let candidates = Object.keys(users).filter(uid =>
+    uid != id &&
+    (!likes[id] || !likes[id].includes(uid))
   );
 
-  if (!list.length) {
+  // Убираем повтор подряд
+  candidates = candidates.filter(uid => uid !== lastShown[id]);
+
+  if (!candidates.length) {
     return ctx.reply("Анкеты закончились 😢");
   }
 
-  const target = list[Math.floor(Math.random() * list.length)];
+  const target = candidates[Math.floor(Math.random() * candidates.length)];
+
   browsing[id] = target;
+  lastShown[id] = target;
 
   const profile = users[target];
 
@@ -126,9 +121,12 @@ function showNextProfile(ctx) {
 bot.hears("❤️ Лайк", (ctx) => {
   const from = ctx.from.id;
   const to = browsing[from];
+
   if (!to) return;
 
   if (!likes[from]) likes[from] = [];
+
+  // Уже лайкал
   if (likes[from].includes(to)) {
     return ctx.reply("Ты уже лайкал этого человека");
   }
@@ -140,17 +138,18 @@ bot.hears("❤️ Лайк", (ctx) => {
 
   ctx.telegram.sendMessage(
     to,
-    "🔥 Кто-то лайкнул тебя!\nЗайди в «Кто меня лайкнул»"
+    "🔥 Кто-то лайкнул тебя!\nПроверь «Кто меня лайкнул»"
   );
 
+  // Проверка на матч
   if (likes[to] && likes[to].includes(String(from))) {
     ctx.reply(
-      `💖 МЕТЧ!\nВот его username: @${ctx.from.username || "без username"}`
+      `💖 МАТЧ!\n@${users[to].username || "без username"}`
     );
 
     ctx.telegram.sendMessage(
       to,
-      `💖 МЕТЧ!\nВот его username: @${ctx.from.username || "без username"}`
+      `💖 МАТЧ!\n@${users[from].username || "без username"}`
     );
   }
 
@@ -163,13 +162,12 @@ bot.hears("⏭ Скип", (ctx) => {
 
 bot.hears("❤️ Кто меня лайкнул", (ctx) => {
   const id = ctx.from.id;
+
   if (!likedBy[id] || !likedBy[id].length) {
-    return ctx.reply("Пока никто не лайкал 😔");
+    return ctx.reply("Пока никто не лайкал");
   }
 
-  const liker = likedBy[id].shift();
-  viewingLikes[id] = liker;
-
+  const liker = likedBy[id][0];
   const profile = users[liker];
 
   ctx.replyWithPhoto(profile.photo, {
@@ -177,46 +175,17 @@ bot.hears("❤️ Кто меня лайкнул", (ctx) => {
       `${profile.name}, ${profile.age}\n` +
       `${profile.type}\n` +
       `${profile.city}\n\n` +
-      `${profile.about}`,
-    ...Markup.keyboard([
-      ["❤️ Ответить лайком", "❌ Скип"],
-      ["⬅️ Назад"]
-    ]).resize()
+      `${profile.about}`
   });
-});
-
-bot.hears("❤️ Ответить лайком", (ctx) => {
-  const from = ctx.from.id;
-  const to = viewingLikes[from];
-  if (!to) return;
-
-  if (!likes[from]) likes[from] = [];
-  if (!likes[from].includes(to)) {
-    likes[from].push(to);
-  }
-
-  ctx.reply(
-    `💖 МЕТЧ!\nВот его username: @${users[to].username || "без username"}`
-  );
-
-  ctx.telegram.sendMessage(
-    to,
-    `💖 МЕТЧ!\nВот его username: @${ctx.from.username || "без username"}`
-  );
-
-  showNextProfile(ctx);
-});
-
-bot.hears("❌ Скип", (ctx) => {
-  ctx.reply("Ок, пропустили");
-  ctx.reply("Главное меню:", mainMenu());
 });
 
 bot.on("photo", (ctx) => {
   if (state[ctx.from.id] === "photo") {
     const fileId = ctx.message.photo.pop().file_id;
+
     users[ctx.from.id].photo = fileId;
     users[ctx.from.id].username = ctx.from.username;
+
     state[ctx.from.id] = null;
 
     ctx.reply("Анкета создана ✅", mainMenu());
@@ -227,13 +196,7 @@ bot.on("text", (ctx) => {
   const id = ctx.from.id;
   const text = ctx.message.text;
 
-  if (broadcastMode && id === ADMIN_ID) {
-    Object.keys(users).forEach(uid => {
-      ctx.telegram.sendMessage(uid, text);
-    });
-    broadcastMode = false;
-    return ctx.reply("Рассылка отправлена ✅");
-  }
+  if (!state[id]) return;
 
   switch (state[id]) {
     case "name":
@@ -279,3 +242,4 @@ bot.on("text", (ctx) => {
 });
 
 bot.launch();
+console.log("Bot started");
