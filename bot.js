@@ -28,7 +28,7 @@ function profileMenu() {
 
 // ===== START =====
 bot.start((ctx) => {
-  ctx.reply("Главное меню:", mainMenu());
+  ctx.reply("Добро пожаловать в ALEXANDER DUGINчик 😈\n\nГлавное меню:", mainMenu());
 });
 
 // ===== ПОМОЩЬ =====
@@ -38,13 +38,14 @@ bot.hears("ℹ️ Помощь", (ctx) => {
     "/start — меню\n" +
     "/profile — профиль\n" +
     "/broadcast — рассылка (админ)\n\n" +
+    "Регистрация 14+\n\n" +
     "Поддержка: @DjKozyavkin"
   );
 });
 
 // ===== ПРОФИЛЬ =====
 bot.hears("👤 Мой профиль", (ctx) => {
-  const id = ctx.from.id;
+  const id = String(ctx.from.id);
   const user = users[id];
 
   if (!user) {
@@ -53,14 +54,18 @@ bot.hears("👤 Мой профиль", (ctx) => {
   }
 
   ctx.replyWithPhoto(user.photo, {
-    caption: `${user.name}, ${user.age}\n📍 ${user.city}\n\n${user.about}`
+    caption:
+      `${user.name}, ${user.age}\n` +
+      `${user.type}\n` +
+      `${user.city}\n\n` +
+      `${user.about}`
   });
 
   ctx.reply("Управление анкетой:", profileMenu());
 });
 
 bot.hears("🔄 Заполнить анкету заново", (ctx) => {
-  const id = ctx.from.id;
+  const id = String(ctx.from.id);
   delete users[id];
   delete likes[id];
   delete likedBy[id];
@@ -95,7 +100,10 @@ function browse(ctx) {
 
   ctx.replyWithPhoto(profile.photo, {
     caption:
-      `${profile.name}, ${profile.age}\n📍 ${profile.city}\n\n${profile.about}`,
+      `${profile.name}, ${profile.age}\n` +
+      `${profile.type}\n` +
+      `${profile.city}\n\n` +
+      `${profile.about}`,
     reply_markup: {
       inline_keyboard: [
         [
@@ -152,7 +160,7 @@ bot.action(/like_(.+)/, async (ctx) => {
 
     await ctx.telegram.sendMessage(
       targetId,
-      "❤️ Тебя кто-то лайкнул!\nЗайди в «Кто меня лайкнул»"
+      "🔥 Кто-то признал твоё величие.\nПроверь «Кто меня лайкнул»"
     );
 
     ctx.answerCbQuery("Лайк отправлен ❤️");
@@ -187,7 +195,11 @@ function showNextLiker(ctx) {
 
   ctx.replyWithPhoto(profile.photo, {
     caption:
-      `Тебя лайкнул:\n\n${profile.name}, ${profile.age}\n📍 ${profile.city}\n\n${profile.about}`,
+      `Тебя лайкнул:\n\n` +
+      `${profile.name}, ${profile.age}\n` +
+      `${profile.type}\n` +
+      `${profile.city}\n\n` +
+      `${profile.about}`,
     reply_markup: {
       inline_keyboard: [
         [
@@ -253,23 +265,44 @@ bot.on("text", async (ctx) => {
   if (!state[id]) return;
 
   switch (state[id]) {
+
     case "name":
       users[id] = { name: text };
       state[id] = "age";
       return ctx.reply("Сколько тебе лет?");
 
     case "age":
-      if (isNaN(text) || text < 18) {
-        return ctx.reply("Только 18+");
+      if (isNaN(text) || text < 14) {
+        return ctx.reply("Регистрация доступна с 14 лет.");
       }
       users[id].age = text;
+      state[id] = "type";
+      return ctx.reply(
+        "Выбери свой путь:",
+        Markup.keyboard([
+          ["🧔 Инцел"],
+          ["👩 Фемцел"]
+        ]).resize()
+      );
+
+    case "type":
+      if (text !== "🧔 Инцел" && text !== "👩 Фемцел") {
+        return ctx.reply("Выбери кнопку 😈");
+      }
+      users[id].type = text;
       state[id] = "city";
-      return ctx.reply("Москва или Село?");
+      return ctx.reply(
+        "Где ты обитаешь?",
+        Markup.keyboard([
+          ["🏙 Москва"],
+          ["🌾 Село"]
+        ]).resize()
+      );
 
     case "city":
       users[id].city = text;
       state[id] = "about";
-      return ctx.reply("Напиши пару слов о себе:");
+      return ctx.reply("Опиши себя:");
 
     case "about":
       users[id].about = text;
