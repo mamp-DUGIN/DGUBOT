@@ -1,6 +1,6 @@
 const { Telegraf, Markup } = require("telegraf");
 
-const bot = new Telegraf("YOUR_BOT_TOKEN"); // <-- вставь токен
+const bot = new Telegraf(process.env.BOT_TOKEN); // <-- вставь токен
 const ADMIN_ID = 2007502528;
 
 const START_PHOTO = "https://i.postimg.cc/zf5hCDHg/424242142141.png";
