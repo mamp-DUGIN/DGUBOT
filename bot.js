@@ -2,11 +2,10 @@ const { Telegraf, Markup } = require("telegraf");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// ===== ХРАНИЛИЩЕ =====
 const users = {};
 const state = {};
 
-// ===== ГЛАВНОЕ МЕНЮ =====
+// ===== МЕНЮ =====
 function mainMenu() {
   return Markup.keyboard([
     ["🔍 Смотреть анкеты"],
@@ -17,19 +16,27 @@ function mainMenu() {
 
 // ===== START =====
 bot.start((ctx) => {
-  ctx.reply(
-    "Добро пожаловать в ALEXANDER DUGINчик 😈",
-    mainMenu()
-  );
+  return ctx.reply("Главное меню:", mainMenu());
 });
 
 bot.command("menu", (ctx) => {
-  ctx.reply("Главное меню:", mainMenu());
+  return ctx.reply("Главное меню:", mainMenu());
+});
+
+// ===== ПОМОЩЬ =====
+bot.hears("ℹ️ Помощь", (ctx) => {
+  return ctx.reply(
+    "📌 Команды:\n" +
+    "/start — меню\n" +
+    "/profile — моя анкета\n" +
+    "/browse — смотреть анкеты\n\n" +
+    "По всем вопросам: @DjKozyavkin"
+  );
 });
 
 // ===== ПРОФИЛЬ =====
 bot.command("profile", (ctx) => {
-  showProfile(ctx);
+  return showProfile(ctx);
 });
 
 bot.hears("👤 Моя анкета", (ctx) => {
@@ -40,7 +47,7 @@ bot.hears("👤 Моя анкета", (ctx) => {
     return ctx.reply("Создаём анкету.\nКак тебя зовут?");
   }
 
-  showProfile(ctx);
+  return showProfile(ctx);
 });
 
 function showProfile(ctx) {
@@ -48,10 +55,10 @@ function showProfile(ctx) {
   const user = users[id];
 
   if (!user) {
-    return ctx.reply("У тебя нет анкеты.\nНажми «👤 Моя анкета» чтобы создать.");
+    return ctx.reply("Анкета не найдена.");
   }
 
-  ctx.replyWithPhoto(user.photo, {
+  return ctx.replyWithPhoto(user.photo, {
     caption:
       `${user.name}, ${user.age}\n` +
       `📍 ${user.city}\n\n` +
@@ -59,63 +66,16 @@ function showProfile(ctx) {
   });
 }
 
-// ===== РЕГИСТРАЦИЯ =====
-bot.on("text", (ctx) => {
-  const id = ctx.from.id;
-  if (!state[id]) return;
-
-  const text = ctx.message.text;
-
-  switch (state[id]) {
-    case "name":
-      users[id] = { name: text };
-      state[id] = "age";
-      ctx.reply("Сколько тебе лет?");
-      break;
-
-    case "age":
-      if (isNaN(text) || text < 18) {
-        return ctx.reply("Только 18+");
-      }
-      users[id].age = text;
-      state[id] = "city";
-      ctx.reply("Из какого ты города?");
-      break;
-
-    case "city":
-      users[id].city = text;
-      state[id] = "about";
-      ctx.reply("Напиши пару слов о себе:");
-      break;
-
-    case "about":
-      users[id].about = text;
-      state[id] = "photo";
-      ctx.reply("Отправь фото:");
-      break;
-  }
-});
-
-bot.on("photo", (ctx) => {
-  const id = ctx.from.id;
-  if (state[id] !== "photo") return;
-
-  users[id].photo = ctx.message.photo.pop().file_id;
-  delete state[id];
-
-  ctx.reply("Анкета создана ✅", mainMenu());
-});
-
-// ===== ПОИСК АНКЕТ =====
+// ===== ПОИСК =====
 bot.command("browse", (ctx) => {
-  browseProfiles(ctx);
+  return browse(ctx);
 });
 
 bot.hears("🔍 Смотреть анкеты", (ctx) => {
-  browseProfiles(ctx);
+  return browse(ctx);
 });
 
-function browseProfiles(ctx) {
+function browse(ctx) {
   const id = ctx.from.id;
 
   if (!users[id]) {
@@ -133,7 +93,7 @@ function browseProfiles(ctx) {
   const [_, profile] =
     others[Math.floor(Math.random() * others.length)];
 
-  ctx.replyWithPhoto(profile.photo, {
+  return ctx.replyWithPhoto(profile.photo, {
     caption:
       `${profile.name}, ${profile.age}\n` +
       `📍 ${profile.city}\n\n` +
@@ -141,15 +101,49 @@ function browseProfiles(ctx) {
   });
 }
 
-// ===== ПОМОЩЬ =====
-bot.hears("ℹ️ Помощь", (ctx) => {
-  ctx.reply(
-    "Команды:\n" +
-    "/start — открыть меню\n" +
-    "/menu — главное меню\n" +
-    "/profile — моя анкета\n" +
-    "/browse — смотреть анкеты"
-  );
+// ===== РЕГИСТРАЦИЯ =====
+bot.on("text", (ctx) => {
+  const id = ctx.from.id;
+
+  if (!state[id]) return; // ВАЖНО
+
+  const text = ctx.message.text;
+
+  switch (state[id]) {
+    case "name":
+      users[id] = { name: text };
+      state[id] = "age";
+      return ctx.reply("Сколько тебе лет?");
+
+    case "age":
+      if (isNaN(text) || text < 18) {
+        return ctx.reply("Только 18+");
+      }
+      users[id].age = text;
+      state[id] = "city";
+      return ctx.reply("Из какого ты города?");
+
+    case "city":
+      users[id].city = text;
+      state[id] = "about";
+      return ctx.reply("Напиши пару слов о себе:");
+
+    case "about":
+      users[id].about = text;
+      state[id] = "photo";
+      return ctx.reply("Отправь фото:");
+  }
+});
+
+bot.on("photo", (ctx) => {
+  const id = ctx.from.id;
+
+  if (state[id] !== "photo") return;
+
+  users[id].photo = ctx.message.photo.pop().file_id;
+  delete state[id];
+
+  return ctx.reply("Анкета создана ✅", mainMenu());
 });
 
 bot.launch();
