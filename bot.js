@@ -12,6 +12,9 @@ let likes = {};
 let likedBy = {};
 let browsing = {};
 let lastShown = {};
+let adminState = {};
+
+// ================== МЕНЮ ==================
 
 function mainMenu() {
   return Markup.keyboard([
@@ -29,16 +32,28 @@ function profileMenu() {
   ]).resize();
 }
 
+// ================== START ==================
+
 bot.start((ctx) => {
   ctx.replyWithPhoto(START_PHOTO, {
     caption:
-      "Этот бот создан энтузиастом для любителей мемов.\n" +
-      "Знакомьтесь, общайтесь и получайте матч!",
+      "Этот бот был создан инцелом для инцелов.\n" +
+      "Знакомьтесь, играйте и получайте матчи.",
     reply_markup: mainMenu().reply_markup
   });
 });
 
+// ================== ПРОФИЛЬ ==================
+
+bot.command("profile", (ctx) => {
+  showProfile(ctx);
+});
+
 bot.hears("👤 Мой профиль", (ctx) => {
+  showProfile(ctx);
+});
+
+function showProfile(ctx) {
   const user = users[ctx.from.id];
 
   if (!user) {
@@ -54,26 +69,33 @@ bot.hears("👤 Мой профиль", (ctx) => {
       `${user.about}`,
     reply_markup: profileMenu().reply_markup
   });
-});
-
-bot.hears("⬅️ Назад", (ctx) => {
-  ctx.reply("Главное меню:", mainMenu());
-});
+}
 
 bot.hears("🔄 Заполнить заново", (ctx) => {
   state[ctx.from.id] = "name";
   ctx.reply("Введите имя:");
 });
 
+bot.hears("⬅️ Назад", (ctx) => {
+  ctx.reply("Главное меню:", mainMenu());
+});
+
+// ================== ПОМОЩЬ ==================
+
 bot.hears("ℹ️ Помощь", (ctx) => {
   ctx.replyWithPhoto(HELP_PHOTO, {
     caption:
       "Команды:\n" +
-      "/start — меню\n\n" +
-      "Регистрация 14+\n" +
+      "/start — меню\n" +
+      "/profile — профиль\n" +
+      "/broadcast — рассылка (админ)\n\n" +
+      "Регистрация 14+\n\n" +
+      "Официальный канал:\nhttps://t.me/DGUBOTOFF\n\n" +
       "Поддержка: @DjKozyavkin"
   });
 });
+
+// ================== ПОИСК ==================
 
 bot.hears("🔍 Поиск", (ctx) => {
   if (!users[ctx.from.id]) {
@@ -91,7 +113,6 @@ function showNextProfile(ctx) {
     (!likes[id] || !likes[id].includes(uid))
   );
 
-  // Убираем повтор подряд
   candidates = candidates.filter(uid => uid !== lastShown[id]);
 
   if (!candidates.length) {
@@ -118,7 +139,9 @@ function showNextProfile(ctx) {
   });
 }
 
-bot.hears("❤️ Лайк", (ctx) => {
+// ================== ЛАЙК ==================
+
+bot.hears("❤️ Лайк", async (ctx) => {
   const from = ctx.from.id;
   const to = browsing[from];
 
@@ -126,7 +149,6 @@ bot.hears("❤️ Лайк", (ctx) => {
 
   if (!likes[from]) likes[from] = [];
 
-  // Уже лайкал
   if (likes[from].includes(to)) {
     return ctx.reply("Ты уже лайкал этого человека");
   }
@@ -136,18 +158,17 @@ bot.hears("❤️ Лайк", (ctx) => {
   if (!likedBy[to]) likedBy[to] = [];
   likedBy[to].push(from);
 
-  ctx.telegram.sendMessage(
+  await ctx.telegram.sendMessage(
     to,
-    "🔥 Кто-то лайкнул тебя!\nПроверь «Кто меня лайкнул»"
+    "🔥 Кто-то лайкнул тебя!\nЗайди в «Кто меня лайкнул»"
   );
 
-  // Проверка на матч
   if (likes[to] && likes[to].includes(String(from))) {
-    ctx.reply(
+    await ctx.reply(
       `💖 МАТЧ!\n@${users[to].username || "без username"}`
     );
 
-    ctx.telegram.sendMessage(
+    await ctx.telegram.sendMessage(
       to,
       `💖 МАТЧ!\n@${users[from].username || "без username"}`
     );
@@ -159,6 +180,8 @@ bot.hears("❤️ Лайк", (ctx) => {
 bot.hears("⏭ Скип", (ctx) => {
   showNextProfile(ctx);
 });
+
+// ================== КТО МЕНЯ ЛАЙКНУЛ ==================
 
 bot.hears("❤️ Кто меня лайкнул", (ctx) => {
   const id = ctx.from.id;
@@ -179,22 +202,35 @@ bot.hears("❤️ Кто меня лайкнул", (ctx) => {
   });
 });
 
-bot.on("photo", (ctx) => {
-  if (state[ctx.from.id] === "photo") {
-    const fileId = ctx.message.photo.pop().file_id;
+// ================== BROADCAST ==================
 
-    users[ctx.from.id].photo = fileId;
-    users[ctx.from.id].username = ctx.from.username;
-
-    state[ctx.from.id] = null;
-
-    ctx.reply("Анкета создана ✅", mainMenu());
+bot.command("broadcast", (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("Нет доступа.");
   }
+
+  adminState[ctx.from.id] = "broadcast";
+  ctx.reply("Введи текст для рассылки:");
 });
 
-bot.on("text", (ctx) => {
+bot.on("text", async (ctx) => {
   const id = ctx.from.id;
   const text = ctx.message.text;
+
+  // ===== РАССЫЛКА =====
+  if (adminState[id] === "broadcast") {
+    let sent = 0;
+
+    for (const userId of Object.keys(users)) {
+      try {
+        await ctx.telegram.sendMessage(userId, text);
+        sent++;
+      } catch (e) {}
+    }
+
+    adminState[id] = null;
+    return ctx.reply(`Рассылка завершена ✅\nОтправлено: ${sent}`);
+  }
 
   if (!state[id]) return;
 
@@ -238,6 +274,19 @@ bot.on("text", (ctx) => {
       users[id].about = text;
       state[id] = "photo";
       return ctx.reply("Пришли фото:");
+  }
+});
+
+bot.on("photo", (ctx) => {
+  if (state[ctx.from.id] === "photo") {
+    const fileId = ctx.message.photo.pop().file_id;
+
+    users[ctx.from.id].photo = fileId;
+    users[ctx.from.id].username = ctx.from.username;
+
+    state[ctx.from.id] = null;
+
+    ctx.reply("Анкета создана ✅", mainMenu());
   }
 });
 
