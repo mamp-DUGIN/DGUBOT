@@ -12,52 +12,46 @@ if (!process.env.DATABASE_URL) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const ADMIN_ID = Number(process.env.ADMIN_ID);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-const START_PHOTO = "https://i.postimg.cc/zf5hCDHg/424242142141.png";
-
 let state = {};
 let browsing = {};
-let lastShown = {};
 
-// ===== ИНИЦИАЛИЗАЦИЯ БАЗЫ =====
+// ===== INIT DB =====
 
 async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id BIGINT PRIMARY KEY,
-        name TEXT,
-        age INT,
-        type TEXT,
-        city TEXT,
-        about TEXT,
-        photo TEXT,
-        username TEXT
-      );
-    `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGINT PRIMARY KEY,
+      name TEXT,
+      age INT,
+      type TEXT,
+      city TEXT,
+      about TEXT,
+      photo TEXT,
+      username TEXT
+    );
+  `);
 
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS likes (
-        from_id BIGINT,
-        to_id BIGINT,
-        UNIQUE(from_id, to_id)
-      );
-    `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS likes (
+      from_id BIGINT,
+      to_id BIGINT,
+      UNIQUE(from_id, to_id)
+    );
+  `);
 
-    console.log("Database connected");
-  } catch (err) {
-    console.error("DB error:", err);
-  }
+  console.log("Database connected");
 }
 
 initDB();
 
-// ===== МЕНЮ =====
+// ===== MENU =====
 
 function mainMenu() {
   return Markup.keyboard([
@@ -70,19 +64,14 @@ function mainMenu() {
 // ===== START =====
 
 bot.start((ctx) => {
-  ctx.replyWithPhoto(START_PHOTO, {
-    caption:
-      "Добро пожаловать.\n\n" +
-      "Создай анкету и начинай поиск.",
-    reply_markup: mainMenu().reply_markup
-  });
+  ctx.reply("Добро пожаловать!", mainMenu());
 });
 
-// ===== ПРОФИЛЬ =====
+// ===== PROFILE =====
 
 bot.hears("👤 Мой профиль", async (ctx) => {
   const res = await pool.query(
-    "SELECT * FROM users WHERE id = $1",
+    "SELECT * FROM users WHERE id=$1",
     [ctx.from.id]
   );
 
@@ -91,18 +80,14 @@ bot.hears("👤 Мой профиль", async (ctx) => {
     return ctx.reply("У тебя нет анкеты. Введи имя:");
   }
 
-  const user = res.rows[0];
+  const u = res.rows[0];
 
-  ctx.replyWithPhoto(user.photo, {
-    caption:
-      `${user.name}, ${user.age}\n` +
-      `${user.type}\n` +
-      `${user.city}\n\n` +
-      `${user.about}`
+  ctx.replyWithPhoto(u.photo, {
+    caption: `${u.name}, ${u.age}\n${u.type}\n${u.city}\n\n${u.about}`
   });
 });
 
-// ===== СОЗДАНИЕ АНКЕТЫ =====
+// ===== CREATE PROFILE =====
 
 bot.on("text", async (ctx) => {
   const id = ctx.from.id;
@@ -110,88 +95,67 @@ bot.on("text", async (ctx) => {
 
   if (!state[id]) return;
 
-  const userState = state[id];
+  const s = state[id];
 
-  if (userState.step === "name") {
-    userState.name = text;
-    userState.step = "age";
+  if (s.step === "name") {
+    s.name = text;
+    s.step = "age";
     return ctx.reply("Возраст?");
   }
 
-  if (userState.step === "age") {
+  if (s.step === "age") {
     if (isNaN(text) || text < 14)
       return ctx.reply("Минимум 14 лет.");
 
-    userState.age = text;
-    userState.step = "type";
-
-    return ctx.reply(
-      "Выбери тип:",
-      Markup.keyboard([
-        ["🧔 Инцел"],
-        ["👩 Фемцел"]
-      ]).resize()
-    );
+    s.age = Number(text);
+    s.step = "type";
+    return ctx.reply("Тип:", Markup.keyboard([
+      ["🧔 Инцел"],
+      ["👩 Фемцел"]
+    ]).resize());
   }
 
-  if (userState.step === "type") {
-    userState.type = text;
-    userState.step = "city";
-
-    return ctx.reply(
-      "Город:",
-      Markup.keyboard([
-        ["🏙 Москва"],
-        ["🌾 Село"]
-      ]).resize()
-    );
+  if (s.step === "type") {
+    s.type = text;
+    s.step = "city";
+    return ctx.reply("Город:");
   }
 
-  if (userState.step === "city") {
-    userState.city = text;
-    userState.step = "about";
-    return ctx.reply("Напиши о себе:");
+  if (s.step === "city") {
+    s.city = text;
+    s.step = "about";
+    return ctx.reply("О себе:");
   }
 
-  if (userState.step === "about") {
-    userState.about = text;
-    userState.step = "photo";
+  if (s.step === "about") {
+    s.about = text;
+    s.step = "photo";
     return ctx.reply("Пришли фото:");
   }
 });
 
-// ===== ФОТО =====
+// ===== PHOTO =====
 
 bot.on("photo", async (ctx) => {
   const id = ctx.from.id;
-
   if (!state[id] || state[id].step !== "photo") return;
 
+  const s = state[id];
   const fileId = ctx.message.photo.pop().file_id;
-  const data = state[id];
 
   await pool.query(
-    `INSERT INTO users (id, name, age, type, city, about, photo, username)
+    `INSERT INTO users (id,name,age,type,city,about,photo,username)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (id) DO UPDATE
-     SET name=$2, age=$3, type=$4, city=$5, about=$6, photo=$7, username=$8`,
-    [
-      id,
-      data.name,
-      data.age,
-      data.type,
-      data.city,
-      data.about,
-      fileId,
-      ctx.from.username
-    ]
+     ON CONFLICT (id) DO UPDATE SET
+     name=$2,age=$3,type=$4,city=$5,about=$6,photo=$7,username=$8`,
+    [id, s.name, s.age, s.type, s.city, s.about, fileId, ctx.from.username]
   );
 
-  state[id] = null;
+  delete state[id];
   ctx.reply("Анкета сохранена ✅", mainMenu());
 });
 
-// ===== ПОИСК =====
+// ===== SEARCH =====
 
 bot.hears("🔍 Поиск", async (ctx) => {
   const id = ctx.from.id;
@@ -204,41 +168,35 @@ bot.hears("🔍 Поиск", async (ctx) => {
   if (!res.rows.length)
     return ctx.reply("Анкет пока нет.");
 
-  const user = res.rows[0];
+  const u = res.rows[0];
+  browsing[id] = u.id;
 
-  browsing[id] = user.id;
-  lastShown[id] = user.id;
-
-  ctx.replyWithPhoto(user.photo, {
-    caption:
-      `${user.name}, ${user.age}\n` +
-      `${user.type}\n` +
-      `${user.city}\n\n` +
-      `${user.about}`,
+  ctx.replyWithPhoto(u.photo, {
+    caption: `${u.name}, ${u.age}\n${u.type}\n${u.city}\n\n${u.about}`,
     reply_markup: Markup.keyboard([
       ["❤️ Лайк", "➡️ Дальше"]
     ]).resize().reply_markup
   });
 });
 
-// ===== ДАЛЬШЕ =====
+// ===== NEXT =====
 
-bot.hears("➡️ Дальше", (ctx) => {
-  ctx.emit("text", { ...ctx.message, text: "🔍 Поиск" });
+bot.hears("➡️ Дальше", async (ctx) => {
+  ctx.deleteMessage().catch(()=>{});
+  ctx.telegram.sendMessage(ctx.chat.id, "🔍 Поиск");
 });
 
-// ===== ЛАЙК =====
+// ===== LIKE =====
 
 bot.hears("❤️ Лайк", async (ctx) => {
   const from = ctx.from.id;
   const to = browsing[from];
-
   if (!to) return;
 
   try {
     await pool.query(
-      "INSERT INTO likes (from_id, to_id) VALUES ($1,$2)",
-      [from, to]
+      "INSERT INTO likes (from_id,to_id) VALUES ($1,$2)",
+      [from,to]
     );
 
     ctx.reply("Лайк отправлен ❤️");
@@ -247,27 +205,54 @@ bot.hears("❤️ Лайк", async (ctx) => {
       to,
       "🔥 Тебя лайкнули!"
     );
-
   } catch {
     ctx.reply("Ты уже лайкал этого человека.");
   }
 });
 
-// ===== КТО МЕНЯ ЛАЙКНУЛ =====
+// ===== WHO LIKED ME =====
 
 bot.hears("❤️ Кто меня лайкнул", async (ctx) => {
-  const res = await pool.query(
-    "SELECT from_id FROM likes WHERE to_id = $1",
-    [ctx.from.id]
-  );
+  const res = await pool.query(`
+    SELECT u.* FROM likes l
+    JOIN users u ON u.id = l.from_id
+    WHERE l.to_id = $1
+  `,[ctx.from.id]);
 
   if (!res.rows.length)
     return ctx.reply("Пока никто не лайкал.");
 
-  ctx.reply(`Тебя лайкнули ${res.rows.length} человек(а).`);
+  for (const u of res.rows) {
+    await ctx.replyWithPhoto(u.photo, {
+      caption: `${u.name}, ${u.age}\n${u.type}\n${u.city}\n\n${u.about}`
+    });
+  }
 });
 
-// ===== ЗАПУСК =====
+// ===== BROADCAST =====
+
+bot.command("broadcast", async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID)
+    return ctx.reply("Нет доступа.");
+
+  const text = ctx.message.text.replace("/broadcast","").trim();
+  if (!text) return ctx.reply("Напиши текст после команды.");
+
+  const users = await pool.query("SELECT id FROM users");
+
+  let sent = 0;
+
+  for (const user of users.rows) {
+    try {
+      await ctx.telegram.sendMessage(user.id, text);
+      sent++;
+    } catch {}
+  }
+
+  ctx.reply(`Рассылка завершена. Отправлено: ${sent}`);
+});
+
+// ===== START BOT =====
 
 bot.launch();
 console.log("Bot started");
