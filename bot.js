@@ -24,6 +24,7 @@ const pool = new Pool({
 // ===== ИНИЦИАЛИЗАЦИЯ БД =====
 async function initDB() {
   try {
+    // Таблица пользователей
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id BIGINT PRIMARY KEY,
@@ -36,7 +37,9 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
+    console.log("✅ Таблица users готова");
 
+    // Таблица лайков - добавили created_at
     await pool.query(`
       CREATE TABLE IF NOT EXISTS likes (
         id SERIAL PRIMARY KEY,
@@ -46,6 +49,17 @@ async function initDB() {
         UNIQUE(from_id, to_id)
       );
     `);
+    console.log("✅ Таблица likes готова");
+
+    // Проверяем, есть ли колонка created_at в существующей таблице
+    try {
+      await pool.query(`SELECT created_at FROM likes LIMIT 1`);
+      console.log("✅ Колонка created_at существует");
+    } catch {
+      // Если нет - добавляем
+      await pool.query(`ALTER TABLE likes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()`);
+      console.log("✅ Добавлена колонка created_at");
+    }
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS subscriptions (
@@ -53,8 +67,8 @@ async function initDB() {
         checked_at TIMESTAMP DEFAULT NOW()
       );
     `);
+    console.log("✅ Таблица subscriptions готова");
 
-    console.log("✅ База готова");
   } catch (err) {
     console.error("❌ Ошибка БД:", err);
   }
@@ -72,14 +86,18 @@ const SAD_MESSAGES = [
   "💔 0 лайков",
   "😔 Пока пусто",
   "📭 Нет лайков",
-  "🦗 Ни одного лайка"
+  "🦗 Ни одного лайка",
+  "💀 Полный ноль",
+  "📪 Пустота",
+  "😴 Тишина"
 ];
 
 const NO_PROFILES = [
   "😢 Пока никого нет",
   "🌚 Пусто",
   "📦 Анкет нет",
-  "💀 Ты один"
+  "💀 Ты один",
+  "🏝️ Один в поле воин"
 ];
 
 // ===== ХРАНИЛИЩА =====
@@ -327,7 +345,7 @@ async function sendLike(ctx) {
     }
     
     await pool.query(
-      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      "INSERT INTO likes (from_id, to_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING",
       [fromId, toId]
     );
     
@@ -359,43 +377,48 @@ async function sendLike(ctx) {
 async function showLikes(ctx, page = 0) {
   const userId = ctx.from.id;
   
-  const likes = await pool.query(`
-    SELECT u.*, l.created_at FROM likes l
-    JOIN users u ON u.id = l.from_id
-    WHERE l.to_id = $1
-    ORDER BY l.created_at DESC
-  `, [userId]);
-  
-  if (likes.rows.length === 0) {
-    const randomMsg = SAD_MESSAGES[Math.floor(Math.random() * SAD_MESSAGES.length)];
-    return ctx.reply(randomMsg, mainMenu());
+  try {
+    const likes = await pool.query(`
+      SELECT u.*, l.created_at FROM likes l
+      JOIN users u ON u.id = l.from_id
+      WHERE l.to_id = $1
+      ORDER BY l.id DESC
+    `, [userId]);
+    
+    if (likes.rows.length === 0) {
+      const randomMsg = SAD_MESSAGES[Math.floor(Math.random() * SAD_MESSAGES.length)];
+      return ctx.reply(randomMsg, mainMenu());
+    }
+    
+    if (page < 0) page = 0;
+    if (page >= likes.rows.length) page = likes.rows.length - 1;
+    
+    const user = likes.rows[page];
+    const date = user.created_at ? new Date(user.created_at).toLocaleDateString() : "недавно";
+    
+    const buttons = [];
+    const navButtons = [];
+    
+    if (page > 0) {
+      navButtons.push(Markup.button.callback('⬅️', `likes_${page - 1}`));
+    }
+    navButtons.push(Markup.button.callback(`${page + 1}/${likes.rows.length}`, 'noop'));
+    if (page < likes.rows.length - 1) {
+      navButtons.push(Markup.button.callback('➡️', `likes_${page + 1}`));
+    }
+    
+    buttons.push(navButtons);
+    buttons.push([Markup.button.callback('❤️ Лайк в ответ', `like_${user.id}`)]);
+    buttons.push([Markup.button.callback('🔙 В меню', 'back_menu')]);
+    
+    await ctx.replyWithPhoto(user.photo, {
+      caption: `${user.name}, ${user.age}\n📍 ${user.city}\n\nЛайкнул: ${date}`,
+      ...Markup.inlineKeyboard(buttons)
+    });
+  } catch (err) {
+    console.error("Ошибка showLikes:", err);
+    ctx.reply("❌ Ошибка при загрузке лайков");
   }
-  
-  if (page < 0) page = 0;
-  if (page >= likes.rows.length) page = likes.rows.length - 1;
-  
-  const user = likes.rows[page];
-  const date = new Date(user.created_at).toLocaleDateString();
-  
-  const buttons = [];
-  const navButtons = [];
-  
-  if (page > 0) {
-    navButtons.push(Markup.button.callback('⬅️', `likes_${page - 1}`));
-  }
-  navButtons.push(Markup.button.callback(`${page + 1}/${likes.rows.length}`, 'noop'));
-  if (page < likes.rows.length - 1) {
-    navButtons.push(Markup.button.callback('➡️', `likes_${page + 1}`));
-  }
-  
-  buttons.push(navButtons);
-  buttons.push([Markup.button.callback('❤️ Лайк в ответ', `like_${user.id}`)]);
-  buttons.push([Markup.button.callback('🔙 В меню', 'back_menu')]);
-  
-  await ctx.replyWithPhoto(user.photo, {
-    caption: `${user.name}, ${user.age}\n📍 ${user.city}\n\nЛайкнул: ${date}`,
-    ...Markup.inlineKeyboard(buttons)
-  });
 }
 
 // ===== INLINE КНОПКИ =====
@@ -439,7 +462,7 @@ bot.action(/like_(\d+)/, async (ctx) => {
   }
   
   await pool.query(
-    "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    "INSERT INTO likes (from_id, to_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING",
     [fromId, toId]
   );
   
@@ -564,14 +587,12 @@ bot.command('stats', async (ctx) => {
   }
 });
 
-// ===== ИСПРАВЛЕННЫЙ BROADCAST =====
+// ===== BROADCAST =====
 bot.command('broadcast', async (ctx) => {
-  // Проверка прав
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ У тебя нет прав на рассылку");
   }
   
-  // Получаем текст
   const text = ctx.message.text.replace('/broadcast', '').trim();
   
   if (!text) {
@@ -582,7 +603,6 @@ bot.command('broadcast', async (ctx) => {
   }
   
   try {
-    // Получаем всех пользователей
     const users = await pool.query("SELECT id FROM users");
     
     if (users.rows.length === 0) {
@@ -598,16 +618,14 @@ bot.command('broadcast', async (ctx) => {
       try {
         await ctx.telegram.sendMessage(
           user.id, 
-          `📢 РАССЫЛКА:\n\n${text}\n\n${CHANNEL_LINK}`,
-          { disable_notification: true }
+          `📢 РАССЫЛКА:\n\n${text}`
         );
         sent++;
       } catch (error) {
         failed++;
-        console.log(`Не удалось отправить ${user.id}:`, error.description);
+        console.log(`Не удалось отправить ${user.id}`);
       }
       
-      // Небольшая задержка чтобы не флудить
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     
@@ -623,7 +641,7 @@ bot.command('broadcast', async (ctx) => {
   }
 });
 
-// ===== ТЕСТОВАЯ КОМАНДА =====
+// ===== ТЕСТ =====
 bot.command('test', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   
