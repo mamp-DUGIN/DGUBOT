@@ -31,7 +31,7 @@ const SUPPORT_USERNAME = process.env.SUPPORT_USERNAME;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false // Важно для Railway
+    rejectUnauthorized: false
   }
 });
 
@@ -64,9 +64,7 @@ async function initDB() {
         from_id BIGINT NOT NULL,
         to_id BIGINT NOT NULL,
         created_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE(from_id, to_id),
-        FOREIGN KEY (from_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY (to_id) REFERENCES users(id) ON DELETE CASCADE
+        UNIQUE(from_id, to_id)
       );
     `);
 
@@ -77,9 +75,7 @@ async function initDB() {
         user_id BIGINT NOT NULL,
         viewed_user_id BIGINT NOT NULL,
         viewed_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE(user_id, viewed_user_id),
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY (viewed_user_id) REFERENCES users(id) ON DELETE CASCADE
+        UNIQUE(user_id, viewed_user_id)
       );
     `);
 
@@ -97,9 +93,9 @@ async function initDB() {
 
 // ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 
-// Главное меню с картинкой
+// Главное меню с картинкой (НОВОЕ ФОТО)
 async function sendMainMenu(ctx) {
-  const photo = 'https://i.postimg.cc/3xkSsBt7/pozdnyakov.png';
+  const photo = 'https://i.postimg.cc/zf5hCDHg/424242142141.png'; // Обновленная ссылка
   const caption = `👋 Добро пожаловать в инцел-знакомства!\n\nВыбирай, чего хочешь:`;
 
   const keyboard = Markup.keyboard([
@@ -115,7 +111,7 @@ async function sendMainMenu(ctx) {
       ...keyboard
     });
   } catch (error) {
-    // Если фото не грузится, отправляем просто текст
+    console.log("Ошибка отправки фото:", error);
     await ctx.reply(caption, keyboard);
   }
 }
@@ -152,15 +148,21 @@ bot.start(async (ctx) => {
 
 // ===== ПОДДЕРЖКА =====
 bot.hears("📞 Поддержка", async (ctx) => {
-  const photo = 'https://i.postimg.cc/3xkSsBt7/pozdnyakov.png';
+  const photo = 'https://i.postimg.cc/zf5hCDHg/424242142141.png';
   const caption = `🛠 Связь с поддержкой\n\nНапиши создателю бота: @${SUPPORT_USERNAME}\n\nОн ответит, если не будет ныть в треде.`;
   
-  await ctx.replyWithPhoto(photo, {
-    caption: caption,
-    ...Markup.keyboard([
+  try {
+    await ctx.replyWithPhoto(photo, {
+      caption: caption,
+      ...Markup.keyboard([
+        ["🔙 Назад в меню"]
+      ]).resize()
+    });
+  } catch (error) {
+    await ctx.reply(caption, Markup.keyboard([
       ["🔙 Назад в меню"]
-    ]).resize()
-  });
+    ]).resize());
+  }
 });
 
 // ===== НАЗАД В МЕНЮ =====
@@ -184,10 +186,27 @@ bot.hears("👤 Мой профиль", async (ctx) => {
   await ctx.replyWithPhoto(profile.photo, {
     caption: `👤 Твоя анкета:\n\n${profile.name}, ${profile.age}\n${profile.type}\n📍 ${profile.city}\n\n📝 ${profile.about}`,
     reply_markup: Markup.keyboard([
+      ["🔄 Заполнить анкету заново"],
       ["🔍 Поиск анкет", "❤️ Кто меня лайкнул"],
       ["📞 Поддержка"]
     ]).resize().reply_markup
   });
+});
+
+// ===== ЗАПОЛНИТЬ АНКЕТУ ЗАНОВО =====
+bot.hears("🔄 Заполнить анкету заново", async (ctx) => {
+  const userId = ctx.from.id;
+  
+  // Удаляем старую анкету
+  await pool.query("DELETE FROM users WHERE id = $1", [userId]);
+  await pool.query("DELETE FROM views WHERE user_id = $1 OR viewed_user_id = $1", [userId]);
+  await pool.query("DELETE FROM likes WHERE from_id = $1 OR to_id = $1", [userId]);
+  
+  state[userId] = { step: "name" };
+  ctx.reply(
+    "🔄 Начинаем создание новой анкеты!\n\n" +
+    "Введи имя (можно ненастоящее, мы никому не расскажем):"
+  );
 });
 
 // ===== СОЗДАНИЕ АНКЕТЫ =====
@@ -201,7 +220,8 @@ bot.on("text", async (ctx) => {
       text === "❤️ Кто меня лайкнул" || 
       text === "👤 Мой профиль" || 
       text === "📞 Поддержка" ||
-      text === "🔙 Назад в меню") {
+      text === "🔙 Назад в меню" ||
+      text === "🔄 Заполнить анкету заново") {
     return;
   }
 
@@ -316,6 +336,23 @@ bot.hears("🔍 Поиск анкет", async (ctx) => {
   }
 
   try {
+    // Сначала проверяем, есть ли вообще другие анкеты
+    const totalUsers = await pool.query(
+      "SELECT COUNT(*) FROM users WHERE id != $1",
+      [userId]
+    );
+    
+    if (totalUsers.rows[0].count === "0") {
+      return ctx.reply(
+        "😢 Кроме тебя тут никого нет. Пригласи друзей или подожди, пока кто-нибудь зарегистрируется.",
+        Markup.keyboard([
+          ["👤 Мой профиль"],
+          ["📞 Поддержка"]
+        ]).resize()
+      );
+    }
+
+    // Ищем непросмотренные анкеты
     const result = await pool.query(`
       SELECT u.* FROM users u
       WHERE u.id != $1
@@ -327,11 +364,16 @@ bot.hears("🔍 Поиск анкет", async (ctx) => {
     `, [userId]);
 
     if (!result.rows.length) {
-      const randomMessage = noProfilesMessages[Math.floor(Math.random() * noProfilesMessages.length)];
-      return ctx.reply(randomMessage, Markup.keyboard([
-        ["👤 Мой профиль"],
-        ["📞 Поддержка"]
-      ]).resize());
+      // Если все просмотрены, предлагаем сбросить историю просмотров
+      return ctx.reply(
+        "😢 Ты уже просмотрел все анкеты!\n\n" +
+        "Хочешь начать заново и посмотреть их еще раз?",
+        Markup.keyboard([
+          ["🔄 Сбросить историю просмотров"],
+          ["👤 Мой профиль"],
+          ["📞 Поддержка"]
+        ]).resize()
+      );
     }
 
     const candidate = result.rows[0];
@@ -357,6 +399,23 @@ bot.hears("🔍 Поиск анкет", async (ctx) => {
   }
 });
 
+// ===== СБРОС ИСТОРИИ ПРОСМОТРОВ =====
+bot.hears("🔄 Сбросить историю просмотров", async (ctx) => {
+  const userId = ctx.from.id;
+  
+  await pool.query("DELETE FROM views WHERE user_id = $1", [userId]);
+  
+  ctx.reply(
+    "✅ История просмотров сброшена! Теперь можно заново просмотреть все анкеты.",
+    Markup.keyboard([
+      ["🔍 Поиск анкет"],
+      ["❤️ Кто меня лайкнул"],
+      ["👤 Мой профиль"],
+      ["📞 Поддержка"]
+    ]).resize()
+  );
+});
+
 // ===== ДАЛЬШЕ =====
 bot.hears("➡️ Дальше", async (ctx) => {
   const userId = ctx.from.id;
@@ -373,11 +432,14 @@ bot.hears("➡️ Дальше", async (ctx) => {
     `, [userId]);
 
     if (!result.rows.length) {
-      const randomMessage = noProfilesMessages[Math.floor(Math.random() * noProfilesMessages.length)];
-      return ctx.reply(randomMessage, Markup.keyboard([
-        ["👤 Мой профиль"],
-        ["📞 Поддержка"]
-      ]).resize());
+      return ctx.reply(
+        "😢 Ты уже просмотрел все анкеты!",
+        Markup.keyboard([
+          ["🔄 Сбросить историю просмотров"],
+          ["👤 Мой профиль"],
+          ["📞 Поддержка"]
+        ]).resize()
+      );
     }
 
     const candidate = result.rows[0];
@@ -412,8 +474,18 @@ bot.hears("❤️ Лайк", async (ctx) => {
   }
 
   try {
+    // Проверяем, не лайкал ли уже
+    const existingLike = await pool.query(
+      "SELECT * FROM likes WHERE from_id = $1 AND to_id = $2",
+      [fromId, toId]
+    );
+
+    if (existingLike.rows.length > 0) {
+      return ctx.reply("Ты уже лайкал этого человека!");
+    }
+
     await pool.query(
-      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2)",
       [fromId, toId]
     );
 
@@ -429,7 +501,7 @@ bot.hears("❤️ Лайк", async (ctx) => {
       console.log("User blocked bot or deleted account");
     }
 
-    // Показываем следующую анкету
+    // Автоматически показываем следующую анкету
     const result = await pool.query(`
       SELECT u.* FROM users u
       WHERE u.id != $1
@@ -440,29 +512,32 @@ bot.hears("❤️ Лайк", async (ctx) => {
       LIMIT 1
     `, [fromId]);
 
-    if (!result.rows.length) {
-      const randomMessage = noProfilesMessages[Math.floor(Math.random() * noProfilesMessages.length)];
-      return ctx.reply(randomMessage, Markup.keyboard([
-        ["👤 Мой профиль"],
-        ["📞 Поддержка"]
-      ]).resize());
+    if (result.rows.length > 0) {
+      const candidate = result.rows[0];
+      browsing[fromId] = candidate.id;
+
+      await pool.query(
+        "INSERT INTO views (user_id, viewed_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        [fromId, candidate.id]
+      );
+
+      await ctx.replyWithPhoto(candidate.photo, {
+        caption: `🎭 Следующий:\n\n${candidate.name}, ${candidate.age}\n${candidate.type}\n📍 ${candidate.city}\n\n📝 ${candidate.about}`,
+        reply_markup: Markup.keyboard([
+          ["❤️ Лайк", "➡️ Дальше"],
+          ["🔙 Назад в меню"]
+        ]).resize().reply_markup
+      });
+    } else {
+      ctx.reply(
+        "😢 Больше анкет нет!",
+        Markup.keyboard([
+          ["🔄 Сбросить историю просмотров"],
+          ["👤 Мой профиль"],
+          ["📞 Поддержка"]
+        ]).resize()
+      );
     }
-
-    const candidate = result.rows[0];
-    browsing[fromId] = candidate.id;
-
-    await pool.query(
-      "INSERT INTO views (user_id, viewed_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-      [fromId, candidate.id]
-    );
-
-    await ctx.replyWithPhoto(candidate.photo, {
-      caption: `🎭 Следующий:\n\n${candidate.name}, ${candidate.age}\n${candidate.type}\n📍 ${candidate.city}\n\n📝 ${candidate.about}`,
-      reply_markup: Markup.keyboard([
-        ["❤️ Лайк", "➡️ Дальше"],
-        ["🔙 Назад в меню"]
-      ]).resize().reply_markup
-    });
 
   } catch (error) {
     console.error("Like error:", error);
@@ -517,68 +592,113 @@ bot.hears("❤️ Кто меня лайкнул", async (ctx) => {
   }
 });
 
-// ===== РАССЫЛКА (ТОЛЬКО ДЛЯ АДМИНА) =====
+// ===== РАССЫЛКА (ИСПРАВЛЕННАЯ) =====
 bot.command("broadcast", async (ctx) => {
+  // Проверяем права администратора
   if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("У тебя нет прав на рассылку. Иди ныть в другом месте.");
+    return ctx.reply("⛔ У тебя нет прав на рассылку.");
   }
 
-  const text = ctx.message.text.replace("/broadcast", "").trim();
-  if (!text) {
-    return ctx.reply("Напиши текст после команды. Что разослать-то?");
+  // Получаем текст сообщения
+  const messageText = ctx.message.text;
+  const broadcastText = messageText.replace("/broadcast", "").trim();
+
+  if (!broadcastText) {
+    return ctx.reply(
+      "📝 Использование: /broadcast [текст сообщения]\n\n" +
+      "Пример: /broadcast Всем привет! У нас обнова."
+    );
   }
 
   try {
+    // Получаем всех пользователей
     const users = await pool.query("SELECT id FROM users");
-    let sent = 0;
-    let failed = 0;
-
-    await ctx.reply(`📨 Начинаю рассылку ${users.rows.length} пользователям...`);
-
-    for (const user of users.rows) {
-      try {
-        await ctx.telegram.sendMessage(user.id, text);
-        sent++;
-      } catch (e) {
-        failed++;
-      }
-      // Небольшая задержка чтобы не флудить
-      await new Promise(resolve => setTimeout(resolve, 50));
+    
+    if (users.rows.length === 0) {
+      return ctx.reply("📭 В базе нет пользователей для рассылки.");
     }
 
-    ctx.reply(`✅ Рассылка завершена!\n📨 Отправлено: ${sent}\n❌ Не доставлено: ${failed}`);
+    await ctx.reply(`📨 Начинаю рассылку ${users.rows.length} пользователям...\nЭто может занять некоторое время.`);
+
+    let sent = 0;
+    let failed = 0;
+    const failedUsers = [];
+
+    // Отправляем сообщение каждому пользователю
+    for (const user of users.rows) {
+      try {
+        await ctx.telegram.sendMessage(user.id, broadcastText);
+        sent++;
+        
+        // Небольшая задержка чтобы избежать флуда
+        await new Promise(resolve => setTimeout(resolve, 70));
+      } catch (error) {
+        failed++;
+        failedUsers.push(user.id);
+        console.log(`Failed to send to user ${user.id}:`, error.description || error.message);
+      }
+    }
+
+    // Отправляем отчет
+    let report = `✅ Рассылка завершена!\n\n`;
+    report += `📨 Отправлено: ${sent}\n`;
+    report += `❌ Не доставлено: ${failed}\n`;
+    
+    if (failedUsers.length > 0) {
+      report += `\n⚠️ Не получили (ID): ${failedUsers.join(', ')}`;
+    }
+
+    await ctx.reply(report);
+
+    // Логируем рассылку
+    console.log(`Broadcast completed. Sent: ${sent}, Failed: ${failed}`);
 
   } catch (error) {
     console.error("Broadcast error:", error);
-    ctx.reply("Ошибка при рассылке.");
+    ctx.reply("❌ Произошла ошибка при рассылке.");
   }
 });
 
-// ===== СТАТИСТИКА (ТОЛЬКО ДЛЯ АДМИНА) =====
+// ===== СТАТИСТИКА (ДЛЯ АДМИНА) =====
 bot.command("stats", async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("Нет доступа.");
+    return ctx.reply("⛔ Нет доступа.");
   }
 
   try {
     const usersCount = await pool.query("SELECT COUNT(*) FROM users");
     const likesCount = await pool.query("SELECT COUNT(*) FROM likes");
     const viewsCount = await pool.query("SELECT COUNT(*) FROM views");
+    const mutualLikes = await pool.query(`
+      SELECT COUNT(*) FROM (
+        SELECT l1.from_id, l1.to_id FROM likes l1
+        JOIN likes l2 ON l1.from_id = l2.to_id AND l1.to_id = l2.from_id
+        WHERE l1.from_id < l1.to_id
+      ) mutual
+    `);
 
     const stats = `
-📊 Статистика бота:
+📊 СТАТИСТИКА БОТА
 
 👤 Пользователей: ${usersCount.rows[0].count}
-❤️ Лайков: ${likesCount.rows[0].count}
-👀 Просмотров: ${viewsCount.rows[0].count}
+❤️ Всего лайков: ${likesCount.rows[0].count}
+💕 Взаимных лайков: ${mutualLikes.rows[0].count}
+👀 Просмотров анкет: ${viewsCount.rows[0].count}
     `;
 
     ctx.reply(stats);
 
   } catch (error) {
     console.error("Stats error:", error);
-    ctx.reply("Ошибка при получении статистики.");
+    ctx.reply("❌ Ошибка при получении статистики.");
   }
+});
+
+// ===== ТЕСТОВАЯ КОМАНДА =====
+bot.command("test", async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  
+  await ctx.reply("✅ Бот работает!");
 });
 
 // ===== ЗАПУСК =====
