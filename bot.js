@@ -5,7 +5,8 @@ const { Pool } = require("pg");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 const ADMIN_ID = process.env.ADMIN_ID ? Number(process.env.ADMIN_ID) : 0;
-const CHANNEL_ID = "@DGUBOTOFF"; // ID канала
+const SUPPORT_USERNAME = process.env.SUPPORT_USERNAME || "support";
+const CHANNEL_ID = "@DGUBOTOFF";
 const CHANNEL_LINK = "https://t.me/DGUBOTOFF";
 
 if (!BOT_TOKEN || !DATABASE_URL) {
@@ -23,7 +24,6 @@ const pool = new Pool({
 // ===== ИНИЦИАЛИЗАЦИЯ БД =====
 async function initDB() {
   try {
-    // Пользователи
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id BIGINT PRIMARY KEY,
@@ -37,7 +37,6 @@ async function initDB() {
       );
     `);
 
-    // Лайки
     await pool.query(`
       CREATE TABLE IF NOT EXISTS likes (
         id SERIAL PRIMARY KEY,
@@ -48,7 +47,6 @@ async function initDB() {
       );
     `);
 
-    // Подписки
     await pool.query(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         user_id BIGINT PRIMARY KEY,
@@ -64,10 +62,30 @@ async function initDB() {
 
 initDB();
 
+// ===== ФОТКИ =====
+const MENU_PHOTO = "https://i.postimg.cc/zf5hCDHg/424242142141.png";
+const SUPPORT_PHOTO = "https://i.postimg.cc/3xkSsBt7/pozdnyakov.png";
+
+// ===== ФРАЗЫ =====
+const SAD_MESSAGES = [
+  "😢 Тебя никто не лайкнул",
+  "💔 0 лайков",
+  "😔 Пока пусто",
+  "📭 Нет лайков",
+  "🦗 Ни одного лайка"
+];
+
+const NO_PROFILES = [
+  "😢 Пока никого нет",
+  "🌚 Пусто",
+  "📦 Анкет нет",
+  "💀 Ты один"
+];
+
 // ===== ХРАНИЛИЩА =====
-let state = {};        // Создание анкет
-let currentView = {};   // Текущий просмотр
-let lastLikeTime = {};  // { "from_to": timestamp } для антиспама
+let state = {};
+let currentView = {};
+let lastLikeTime = {};
 
 // ===== ПРОВЕРКА ПОДПИСКИ =====
 async function checkSubscription(userId) {
@@ -83,7 +101,6 @@ async function checkSubscription(userId) {
 bot.use(async (ctx, next) => {
   if (!ctx.from) return next();
   
-  // Команды, доступные без подписки
   const publicCommands = ['/start', '/help', '/check'];
   if (publicCommands.includes(ctx.message?.text)) {
     return next();
@@ -92,9 +109,8 @@ bot.use(async (ctx, next) => {
   const isSubscribed = await checkSubscription(ctx.from.id);
   
   if (!isSubscribed) {
-    // Если не подписан - кидаем ссылку и ничего больше
     return ctx.reply(
-      `🔒 Для использования бота нужно подписаться на канал:\n${CHANNEL_LINK}\n\nПосле подписки нажми кнопку "✅ Я подписался"`,
+      `🔒 Для использования бота нужно подписаться на канал:\n${CHANNEL_LINK}`,
       Markup.inlineKeyboard([
         [Markup.button.url('📢 Перейти в канал', CHANNEL_LINK)],
         [Markup.button.callback('✅ Я подписался', 'check_sub')]
@@ -102,51 +118,21 @@ bot.use(async (ctx, next) => {
     );
   }
   
-  // Запоминаем проверку
-  await pool.query(
-    `INSERT INTO subscriptions (user_id, checked_at) VALUES ($1, NOW()) 
-     ON CONFLICT (user_id) DO UPDATE SET checked_at = NOW()`,
-    [ctx.from.id]
-  );
-  
   return next();
 });
 
-// ===== ПРОВЕРКА ПОДПИСКИ (КОЛЛБЭК) =====
+// ===== ПРОВЕРКА ПОДПИСКИ =====
 bot.action('check_sub', async (ctx) => {
   const isSubscribed = await checkSubscription(ctx.from.id);
   
   if (isSubscribed) {
-    await pool.query(
-      `INSERT INTO subscriptions (user_id, checked_at) VALUES ($1, NOW()) 
-       ON CONFLICT (user_id) DO UPDATE SET checked_at = NOW()`,
-      [ctx.from.id]
-    );
     await ctx.answerCbQuery('✅ Подписка подтверждена!');
-    await ctx.reply('✅ Спасибо! Теперь можешь пользоваться ботом.', mainMenu());
+    await ctx.replyWithPhoto(MENU_PHOTO, {
+      caption: "✅ Спасибо! Главное меню:",
+      ...mainMenu()
+    });
   } else {
     await ctx.answerCbQuery('❌ Ты не подписался!', { show_alert: true });
-  }
-});
-
-// ===== КОМАНДА ПРОВЕРКИ =====
-bot.command('check', async (ctx) => {
-  const isSubscribed = await checkSubscription(ctx.from.id);
-  if (isSubscribed) {
-    await pool.query(
-      `INSERT INTO subscriptions (user_id, checked_at) VALUES ($1, NOW()) 
-       ON CONFLICT (user_id) DO UPDATE SET checked_at = NOW()`,
-      [ctx.from.id]
-    );
-    await ctx.reply('✅ Подписка подтверждена!', mainMenu());
-  } else {
-    await ctx.reply(
-      `❌ Ты не подписан!\n${CHANNEL_LINK}`,
-      Markup.inlineKeyboard([
-        [Markup.button.url('📢 Подписаться', CHANNEL_LINK)],
-        [Markup.button.callback('✅ Я подписался', 'check_sub')]
-      ])
-    );
   }
 });
 
@@ -154,7 +140,7 @@ bot.command('check', async (ctx) => {
 function mainMenu() {
   return Markup.keyboard([
     ["🔍 Поиск", "❤️ Мои лайки"],
-    ["👤 Профиль"]
+    ["👤 Профиль", "📞 Помощь"]
   ]).resize();
 }
 
@@ -163,16 +149,45 @@ bot.start(async (ctx) => {
   const isSubscribed = await checkSubscription(ctx.from.id);
   
   if (!isSubscribed) {
-    return ctx.reply(
-      `👋 Привет!\n\nЭто бот для знакомств.\n\n🔒 Для использования нужно подписаться на канал:\n${CHANNEL_LINK}`,
-      Markup.inlineKeyboard([
+    return ctx.replyWithPhoto(MENU_PHOTO, {
+      caption: `👋 Привет!\n\n🔒 Для использования нужно подписаться на канал:\n${CHANNEL_LINK}`,
+      ...Markup.inlineKeyboard([
         [Markup.button.url('📢 Перейти в канал', CHANNEL_LINK)],
         [Markup.button.callback('✅ Я подписался', 'check_sub')]
       ])
-    );
+    });
   }
   
-  await ctx.reply("👋 Главное меню:", mainMenu());
+  await ctx.replyWithPhoto(MENU_PHOTO, {
+    caption: "👋 Главное меню:",
+    ...mainMenu()
+  });
+});
+
+// ===== ПОМОЩЬ =====
+bot.help(async (ctx) => {
+  const helpText = `
+📋 КОМАНДЫ:
+
+👤 Профиль - создать/посмотреть анкету
+🔍 Поиск - искать анкеты
+❤️ Мои лайки - кто тебя лайкнул
+📞 Помощь - это меню
+
+Для связи: @${SUPPORT_USERNAME}
+  `;
+  
+  await ctx.replyWithPhoto(SUPPORT_PHOTO, {
+    caption: helpText,
+    ...mainMenu()
+  });
+});
+
+bot.hears("📞 Помощь", async (ctx) => {
+  await ctx.replyWithPhoto(SUPPORT_PHOTO, {
+    caption: `🛠 Связь: @${SUPPORT_USERNAME}`,
+    ...Markup.keyboard([["🔙 Назад"]]).resize()
+  });
 });
 
 // ===== ПРОФИЛЬ =====
@@ -186,13 +201,24 @@ bot.hears("👤 Профиль", async (ctx) => {
   }
   
   const u = user.rows[0];
-  await ctx.replyWithPhoto(u.photo, {
-    caption: `👤 Твоя анкета:\n\n${u.name}, ${u.age}\n📍 ${u.city}\n\n${u.about}`,
-    ...Markup.keyboard([
-      ["🔍 Поиск", "❤️ Мои лайки"],
-      ["🆕 Новая анкета"]
-    ]).resize()
-  });
+  
+  try {
+    await ctx.replyWithPhoto(u.photo, {
+      caption: `👤 Твоя анкета:\n\n${u.name}, ${u.age}\n📍 ${u.city}\n\n${u.about}`,
+      ...Markup.keyboard([
+        ["🔍 Поиск", "❤️ Мои лайки"],
+        ["🆕 Новая анкета", "📞 Помощь"]
+      ]).resize()
+    });
+  } catch {
+    await ctx.reply(
+      `${u.name}, ${u.age}\n📍 ${u.city}\n\n${u.about}`,
+      Markup.keyboard([
+        ["🔍 Поиск", "❤️ Мои лайки"],
+        ["🆕 Новая анкета", "📞 Помощь"]
+      ]).resize()
+    );
+  }
 });
 
 // ===== НОВАЯ АНКЕТА =====
@@ -227,7 +253,10 @@ bot.hears("❤️ Лайк", async (ctx) => {
 
 // ===== НАЗАД =====
 bot.hears("🔙 Назад", async (ctx) => {
-  await ctx.reply("Главное меню:", mainMenu());
+  await ctx.replyWithPhoto(MENU_PHOTO, {
+    caption: "Главное меню:",
+    ...mainMenu()
+  });
 });
 
 // ===== ПОИСК АНКЕТ =====
@@ -240,7 +269,6 @@ async function searchProfiles(ctx) {
     return ctx.reply("Сначала создай анкету. Как тебя зовут?");
   }
   
-  // Ищем кого-то кроме себя
   const candidates = await pool.query(`
     SELECT * FROM users 
     WHERE id != $1 
@@ -249,7 +277,8 @@ async function searchProfiles(ctx) {
   `, [userId]);
   
   if (candidates.rows.length === 0) {
-    return ctx.reply("😢 Пока никого нет. Заходи позже.", mainMenu());
+    const randomMsg = NO_PROFILES[Math.floor(Math.random() * NO_PROFILES.length)];
+    return ctx.reply(randomMsg, mainMenu());
   }
   
   const candidate = candidates.rows[0];
@@ -273,7 +302,6 @@ async function sendLike(ctx) {
     return ctx.reply("Сначала найди кого-нибудь в поиске");
   }
   
-  // Проверяем на спам (5 минут)
   const likeKey = `${fromId}_${toId}`;
   const lastTime = lastLikeTime[likeKey];
   const now = Date.now();
@@ -284,7 +312,6 @@ async function sendLike(ctx) {
   }
   
   try {
-    // Проверяем в БД
     const existing = await pool.query(
       "SELECT created_at FROM likes WHERE from_id = $1 AND to_id = $2",
       [fromId, toId]
@@ -299,18 +326,15 @@ async function sendLike(ctx) {
       }
     }
     
-    // Сохраняем лайк
     await pool.query(
       "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
       [fromId, toId]
     );
     
-    // Запоминаем время
     lastLikeTime[likeKey] = now;
     
     ctx.reply("✅ Лайк отправлен!");
     
-    // Уведомление
     try {
       const likeCount = await pool.query(
         "SELECT COUNT(*) FROM likes WHERE to_id = $1",
@@ -319,23 +343,21 @@ async function sendLike(ctx) {
       
       await ctx.telegram.sendMessage(
         toId,
-        `❤️ Тебя лайкнули!\n\nВсего лайков: ${likeCount.rows[0].count}\n\nЗайди в "Мои лайки" посмотреть кто.`
+        `❤️ Тебя лайкнули!\n\nВсего лайков: ${likeCount.rows[0].count}`
       );
     } catch {}
     
-    // Показываем следующего
     await searchProfiles(ctx);
     
   } catch (err) {
     console.log("Ошибка лайка:", err);
-    ctx.reply("❌ Ошибка");
+    ctx.reply("❌ Ошибка при отправке лайка");
   }
 }
 
 // ===== КТО ЛАЙКНУЛ =====
 async function showLikes(ctx, page = 0) {
   const userId = ctx.from.id;
-  const pageSize = 1;
   
   const likes = await pool.query(`
     SELECT u.*, l.created_at FROM likes l
@@ -345,7 +367,8 @@ async function showLikes(ctx, page = 0) {
   `, [userId]);
   
   if (likes.rows.length === 0) {
-    return ctx.reply("😢 Тебя никто не лайкал", mainMenu());
+    const randomMsg = SAD_MESSAGES[Math.floor(Math.random() * SAD_MESSAGES.length)];
+    return ctx.reply(randomMsg, mainMenu());
   }
   
   if (page < 0) page = 0;
@@ -431,7 +454,10 @@ bot.action(/like_(\d+)/, async (ctx) => {
 
 bot.action('back_menu', async (ctx) => {
   await ctx.deleteMessage();
-  await ctx.reply("Главное меню:", mainMenu());
+  await ctx.replyWithPhoto(MENU_PHOTO, {
+    caption: "Главное меню:",
+    ...mainMenu()
+  });
 });
 
 // ===== СОЗДАНИЕ АНКЕТЫ =====
@@ -439,7 +465,7 @@ bot.on("text", async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text;
   
-  if (["🔍 Поиск", "❤️ Мои лайки", "👤 Профиль", "🔙 Назад", "🆕 Новая анкета", "➡️ Дальше", "❤️ Лайк", "Москва", "ЗаМКАДье"].includes(text)) {
+  if (["🔍 Поиск", "❤️ Мои лайки", "👤 Профиль", "📞 Помощь", "🔙 Назад", "🆕 Новая анкета", "➡️ Дальше", "❤️ Лайк", "Москва", "ЗаМКАДье"].includes(text)) {
     return;
   }
   
@@ -490,7 +516,7 @@ bot.on("text", async (ctx) => {
     
   } catch (err) {
     console.log("Ошибка:", err);
-    ctx.reply("Ошибка. Начни заново с /start");
+    ctx.reply("❌ Ошибка. Начни заново с /start");
     delete state[userId];
   }
 });
@@ -512,11 +538,15 @@ bot.on("photo", async (ctx) => {
     );
     
     delete state[userId];
-    ctx.reply("✅ Анкета создана!", mainMenu());
+    
+    await ctx.replyWithPhoto(MENU_PHOTO, {
+      caption: "✅ Анкета создана!",
+      ...mainMenu()
+    });
     
   } catch (err) {
     console.log("Ошибка:", err);
-    ctx.reply("❌ Ошибка");
+    ctx.reply("❌ Ошибка при сохранении");
   }
 });
 
@@ -524,29 +554,84 @@ bot.on("photo", async (ctx) => {
 bot.command('stats', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   
-  const users = await pool.query("SELECT COUNT(*) FROM users");
-  const likes = await pool.query("SELECT COUNT(*) FROM likes");
-  
-  ctx.reply(`👤 Пользователей: ${users.rows[0].count}\n❤️ Лайков: ${likes.rows[0].count}`);
+  try {
+    const users = await pool.query("SELECT COUNT(*) FROM users");
+    const likes = await pool.query("SELECT COUNT(*) FROM likes");
+    
+    ctx.reply(`📊 СТАТИСТИКА:\n\n👤 Пользователей: ${users.rows[0].count}\n❤️ Лайков: ${likes.rows[0].count}`);
+  } catch (err) {
+    ctx.reply(`❌ Ошибка: ${err.message}`);
+  }
 });
 
+// ===== ИСПРАВЛЕННЫЙ BROADCAST =====
 bot.command('broadcast', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  
-  const text = ctx.message.text.replace("/broadcast", "").trim();
-  if (!text) return ctx.reply("Напиши текст");
-  
-  const users = await pool.query("SELECT id FROM users");
-  let sent = 0;
-  
-  for (const user of users.rows) {
-    try {
-      await ctx.telegram.sendMessage(user.id, `📢 ${text}\n\n${CHANNEL_LINK}`);
-      sent++;
-    } catch {}
+  // Проверка прав
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ У тебя нет прав на рассылку");
   }
   
-  ctx.reply(`✅ Отправлено: ${sent}/${users.rows.length}`);
+  // Получаем текст
+  const text = ctx.message.text.replace('/broadcast', '').trim();
+  
+  if (!text) {
+    return ctx.reply(
+      "📝 Использование: /broadcast [текст]\n\n" +
+      "Пример: /broadcast Всем привет!"
+    );
+  }
+  
+  try {
+    // Получаем всех пользователей
+    const users = await pool.query("SELECT id FROM users");
+    
+    if (users.rows.length === 0) {
+      return ctx.reply("📭 Нет пользователей для рассылки");
+    }
+    
+    await ctx.reply(`📨 Начинаю рассылку ${users.rows.length} пользователям...`);
+    
+    let sent = 0;
+    let failed = 0;
+    
+    for (const user of users.rows) {
+      try {
+        await ctx.telegram.sendMessage(
+          user.id, 
+          `📢 РАССЫЛКА:\n\n${text}\n\n${CHANNEL_LINK}`,
+          { disable_notification: true }
+        );
+        sent++;
+      } catch (error) {
+        failed++;
+        console.log(`Не удалось отправить ${user.id}:`, error.description);
+      }
+      
+      // Небольшая задержка чтобы не флудить
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    
+    await ctx.reply(
+      `✅ Рассылка завершена!\n\n` +
+      `📨 Отправлено: ${sent}\n` +
+      `❌ Не доставлено: ${failed}`
+    );
+    
+  } catch (err) {
+    console.error("Ошибка рассылки:", err);
+    ctx.reply(`❌ Ошибка при рассылке: ${err.message}`);
+  }
+});
+
+// ===== ТЕСТОВАЯ КОМАНДА =====
+bot.command('test', async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  
+  try {
+    await ctx.reply("✅ Бот работает!");
+  } catch (err) {
+    await ctx.reply(`❌ Ошибка: ${err.message}`);
+  }
 });
 
 // ===== ЗАПУСК =====
