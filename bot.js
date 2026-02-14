@@ -5,11 +5,11 @@ const { Pool } = require("pg");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 const ADMIN_ID = process.env.ADMIN_ID ? Number(process.env.ADMIN_ID) : 0;
-const SUPPORT_USERNAME = process.env.SUPPORT_USERNAME || "support";
-const CHANNEL_LINK = "https://t.me/DGUBOTOFF"; // Твой канал
+const CHANNEL_ID = "@DGUBOTOFF"; // ID канала
+const CHANNEL_LINK = "https://t.me/DGUBOTOFF";
 
 if (!BOT_TOKEN || !DATABASE_URL) {
-  console.error("❌ Нет токена или базы данных");
+  console.error("❌ Нет токена или базы");
   process.exit(1);
 }
 
@@ -20,23 +20,24 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// ===== СОЗДАНИЕ ТАБЛИЦ =====
+// ===== ИНИЦИАЛИЗАЦИЯ БД =====
 async function initDB() {
   try {
+    // Пользователи
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id BIGINT PRIMARY KEY,
         name TEXT,
         age INT,
-        type TEXT,
         city TEXT,
         about TEXT,
         photo TEXT,
-        username TEXT
+        username TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    console.log("✅ Таблица users готова");
 
+    // Лайки
     await pool.query(`
       CREATE TABLE IF NOT EXISTS likes (
         id SERIAL PRIMARY KEY,
@@ -46,289 +47,200 @@ async function initDB() {
         UNIQUE(from_id, to_id)
       );
     `);
-    console.log("✅ Таблица likes готова");
-    
+
+    // Подписки
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        user_id BIGINT PRIMARY KEY,
+        checked_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    console.log("✅ База готова");
   } catch (err) {
-    console.error("❌ Ошибка создания таблиц:", err);
+    console.error("❌ Ошибка БД:", err);
   }
 }
 
 initDB();
 
-// ===== ФОТКИ =====
-const MENU_PHOTO = "https://i.postimg.cc/zf5hCDHg/424242142141.png";
-const SUPPORT_PHOTO = "https://i.postimg.cc/3xkSsBt7/pozdnyakov.png";
+// ===== ХРАНИЛИЩА =====
+let state = {};        // Создание анкет
+let currentView = {};   // Текущий просмотр
+let lastLikeTime = {};  // { "from_to": timestamp } для антиспама
 
-// ===== МЕМНЫЕ ШУТКИ =====
-const SAD_MESSAGES = [
-  "😢 Тебя никто не лайкнул. Поздняков с коробок тоже один стоит, но у него хоть коробки есть",
-  "💔 0 лайков. Убермаргинал уже заказал додо пиццу с пенивайзом, а ты даже этого не можешь",
-  "😔 Пусто. Джоджо Флойд: 'I CAN'T BREATHE' - это не про лайки, а про тебя",
-  "📭 Лайков нет. Гофман накрутил бы тебе за бутылку, но ты не накрутил",
-  "🦗 Ни одного. Поздняков с коробок хотя бы коробки собирает, а ты собираешь 0",
-  "💀 Тебя не лайкнули. Додо пицца доставляется быстрее, чем тебе лайки"
-];
+// ===== ПРОВЕРКА ПОДПИСКИ =====
+async function checkSubscription(userId) {
+  try {
+    const chatMember = await bot.telegram.getChatMember(CHANNEL_ID, userId);
+    return ['member', 'administrator', 'creator'].includes(chatMember.status);
+  } catch {
+    return false;
+  }
+}
 
-const NO_PROFILES = [
-  "😢 Кроме тебя никого. Поздняков с коробок ушел за новой партией",
-  "🌚 Пусто. Убермаргинал пошел есть додо пиццу с пенивайзом",
-  "📦 Анкет нет. Джоджо Флойд задохнулся от смеха над тобой",
-  "💀 Ты один. Гофман сказал: 'На, выпей' и ушел"
-];
+// ===== МИДЛВАР НА ПОДПИСКУ =====
+bot.use(async (ctx, next) => {
+  if (!ctx.from) return next();
+  
+  // Команды, доступные без подписки
+  const publicCommands = ['/start', '/help', '/check'];
+  if (publicCommands.includes(ctx.message?.text)) {
+    return next();
+  }
+  
+  const isSubscribed = await checkSubscription(ctx.from.id);
+  
+  if (!isSubscribed) {
+    // Если не подписан - кидаем ссылку и ничего больше
+    return ctx.reply(
+      `🔒 Для использования бота нужно подписаться на канал:\n${CHANNEL_LINK}\n\nПосле подписки нажми кнопку "✅ Я подписался"`,
+      Markup.inlineKeyboard([
+        [Markup.button.url('📢 Перейти в канал', CHANNEL_LINK)],
+        [Markup.button.callback('✅ Я подписался', 'check_sub')]
+      ])
+    );
+  }
+  
+  // Запоминаем проверку
+  await pool.query(
+    `INSERT INTO subscriptions (user_id, checked_at) VALUES ($1, NOW()) 
+     ON CONFLICT (user_id) DO UPDATE SET checked_at = NOW()`,
+    [ctx.from.id]
+  );
+  
+  return next();
+});
 
-const LIKE_NOTIFICATIONS = [
-  "🔥 Тебя лайкнули! Поздняков с коробок одобряет (он сейчас в коробке)",
-  "❤️ Лайк! Убермаргинал уже заказал додо пиццу в честь этого",
-  "🎯 Новый лайк! Джоджо Флойд: 'I CAN FINALLY BREATHE'",
-  "💕 Кто-то лайкнул! Гофман наливает"
-];
+// ===== ПРОВЕРКА ПОДПИСКИ (КОЛЛБЭК) =====
+bot.action('check_sub', async (ctx) => {
+  const isSubscribed = await checkSubscription(ctx.from.id);
+  
+  if (isSubscribed) {
+    await pool.query(
+      `INSERT INTO subscriptions (user_id, checked_at) VALUES ($1, NOW()) 
+       ON CONFLICT (user_id) DO UPDATE SET checked_at = NOW()`,
+      [ctx.from.id]
+    );
+    await ctx.answerCbQuery('✅ Подписка подтверждена!');
+    await ctx.reply('✅ Спасибо! Теперь можешь пользоваться ботом.', mainMenu());
+  } else {
+    await ctx.answerCbQuery('❌ Ты не подписался!', { show_alert: true });
+  }
+});
 
-const PROFILE_CREATION = {
-  name: [
-    "Как тебя зовут? (Поздняков представляется через коробку)",
-    "Имя? (Убермаргинал уже заказал додо пиццу с твоим именем)",
-    "Представься. Джоджо Флойд хочет знать, кем он не может дышать",
-    "Как тебя величать? Гофман уже наливает"
-  ],
-  age: [
-    "Сколько лет? (Позднякову столько же, сколько коробок в его коллекции)",
-    "Возраст? (Убермаргинал в твоем возрасте уже ел додо пиццу с пенивайзом)",
-    "Сколько стукнуло? Джоджо Флойду наступили на шею в 39",
-    "Лет тебе? Гофман в твоем возрасте уже бухал"
-  ]
-};
+// ===== КОМАНДА ПРОВЕРКИ =====
+bot.command('check', async (ctx) => {
+  const isSubscribed = await checkSubscription(ctx.from.id);
+  if (isSubscribed) {
+    await pool.query(
+      `INSERT INTO subscriptions (user_id, checked_at) VALUES ($1, NOW()) 
+       ON CONFLICT (user_id) DO UPDATE SET checked_at = NOW()`,
+      [ctx.from.id]
+    );
+    await ctx.reply('✅ Подписка подтверждена!', mainMenu());
+  } else {
+    await ctx.reply(
+      `❌ Ты не подписан!\n${CHANNEL_LINK}`,
+      Markup.inlineKeyboard([
+        [Markup.button.url('📢 Подписаться', CHANNEL_LINK)],
+        [Markup.button.callback('✅ Я подписался', 'check_sub')]
+      ])
+    );
+  }
+});
 
-// ===== КНОПКИ МЕНЮ =====
+// ===== МЕНЮ =====
 function mainMenu() {
   return Markup.keyboard([
-    ["🔍 Искать жертв", "❤️ Кто лайкнул"],
-    ["👤 Мой профиль", "📞 Дядя Гофман"],
-    ["📢 Наш канал"]
+    ["🔍 Поиск", "❤️ Мои лайки"],
+    ["👤 Профиль"]
   ]).resize();
 }
 
-// ===== ХРАНИЛИЩА =====
-let state = {};
-let currentView = {}; // Кто кому сейчас показывается (для лайков)
-let lastShown = {};   // Кого последний раз показывали (для ответных лайков)
-
-// ===== КОМАНДЫ =====
-
-// /start
+// ===== СТАРТ =====
 bot.start(async (ctx) => {
-  console.log(`✅ /start от ${ctx.from.id}`);
-  const greeting = `
-👋 Здарова, уебище!
-
-🤖 Это дно для таких же днышей как ты
-📦 Поздняков с коробок уже в очереди
-🍕 Убермаргинал жрет додо пиццу с пенивайзом
-🫁 Джоджо Флойд: "I CAN'T BREATHE" (это ты без лайков)
-🥃 Гофман: "На, выпей, полегчает"
-📢 Наш канал: ${CHANNEL_LINK}
-
-Погнали на дно:
-  `;
-  try {
-    await ctx.replyWithPhoto(MENU_PHOTO, {
-      caption: greeting,
-      ...mainMenu()
-    });
-  } catch {
-    await ctx.reply(greeting, mainMenu());
-  }
-});
-
-// /help
-bot.help(async (ctx) => {
-  const help = `
-📋 КОМАНДЫ НА ДНЕ:
-
-👤 Мой профиль - создай/посмотри свое убожество
-🔍 Искать жертв - ищи таких же убогих
-❤️ Кто лайкнул - посмотри кто хочет такое же убожество
-📞 Дядя Гофман - налей и поговори
-📢 Наш канал - подпишись, дебил
-
-Для админа-алкаша:
-/test - проверь не сдохло ли
-/stats - сколько вас тут
-/broadcast - всем налей
-
-P.S. Поздняков в коробке, Убермаргинал в додо, 
-Джоджо Флойд не дышит, Гофман наливает
-  `;
-  await ctx.reply(help);
-});
-
-// /test
-bot.command("test", async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return ctx.reply("⛔ Иди отсюда, Поздняков не звал");
+  const isSubscribed = await checkSubscription(ctx.from.id);
   
-  try {
-    const db = await pool.query("SELECT NOW()");
-    const users = await pool.query("SELECT COUNT(*) FROM users");
-    const likes = await pool.query("SELECT COUNT(*) FROM likes");
-    
-    await ctx.reply(
-      `✅ БОТ НА ДНЕ\n\n` +
-      `🕐 Время: ${db.rows[0].now}\n` +
-      `👤 Убогих: ${users.rows[0].count}\n` +
-      `❤️ Лайков (бесполезных): ${likes.rows[0].count}\n\n` +
-      `Поздняков собирает коробки, пока ты тут`
+  if (!isSubscribed) {
+    return ctx.reply(
+      `👋 Привет!\n\nЭто бот для знакомств.\n\n🔒 Для использования нужно подписаться на канал:\n${CHANNEL_LINK}`,
+      Markup.inlineKeyboard([
+        [Markup.button.url('📢 Перейти в канал', CHANNEL_LINK)],
+        [Markup.button.callback('✅ Я подписался', 'check_sub')]
+      ])
     );
-  } catch (err) {
-    await ctx.reply(`❌ Ошибка: ${err.message}\nГофман говорит: "Ну ты и лох"`);
-  }
-});
-
-// /stats
-bot.command("stats", async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return ctx.reply("⛔ Иди, Убермаргинал, додо пиццу жри");
-  
-  const users = await pool.query("SELECT COUNT(*) FROM users");
-  const likes = await pool.query("SELECT COUNT(*) FROM likes");
-  
-  await ctx.reply(
-    `📊 СТАТИСТИКА ДНА:\n\n` +
-    `👤 Днышей: ${users.rows[0].count}\n` +
-    `❤️ Лайков (не взаимных): ${likes.rows[0].count}\n\n` +
-    `Джоджо Флойд: "I CAN'T BREATHE" от такого количества`
-  );
-});
-
-// /broadcast
-bot.command("broadcast", async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return ctx.reply("⛔ Гофман не налил тебе");
-  
-  const text = ctx.message.text.replace("/broadcast", "").trim();
-  if (!text) return ctx.reply("📝 Напиши: /broadcast Всем налить?");
-  
-  const users = await pool.query("SELECT id FROM users");
-  await ctx.reply(`📨 Наливаю ${users.rows.length} алкашам...`);
-  
-  let sent = 0;
-  for (const user of users.rows) {
-    try {
-      await ctx.telegram.sendMessage(user.id, `📢 ГОФМАН НАЛИВАЕТ:\n\n${text}\n\nПейте до дна!\n\nНаш канал: ${CHANNEL_LINK}`);
-      sent++;
-    } catch {}
   }
   
-  ctx.reply(`✅ Налили: ${sent} из ${users.rows.length}\nПоздняков собирает пустые бутылки`);
+  await ctx.reply("👋 Главное меню:", mainMenu());
 });
 
-// ===== КНОПКИ МЕНЮ =====
-
-// 👤 Мой профиль
-bot.hears("👤 Мой профиль", async (ctx) => {
+// ===== ПРОФИЛЬ =====
+bot.hears("👤 Профиль", async (ctx) => {
   const userId = ctx.from.id;
-  console.log(`✅ Профиль от ${userId}`);
-  
   const user = await pool.query("SELECT * FROM users WHERE id = $1", [userId]);
   
   if (user.rows.length === 0) {
-    const randomName = PROFILE_CREATION.name[Math.floor(Math.random() * PROFILE_CREATION.name.length)];
-    await ctx.reply(randomName);
     state[userId] = { step: "name" };
-    return;
+    return ctx.reply("У тебя нет анкеты. Как тебя зовут?");
   }
   
   const u = user.rows[0];
-  
-  try {
-    await ctx.replyWithPhoto(u.photo, {
-      caption: `👤 ТВОЕ УБОЖЕСТВО:\n\n${u.name}, ${u.age} лет\n${u.type}\n📍 ${u.city}\n\n📝 ${u.about}\n\nПоздняков с коробок одобряет (он в коробке)`,
-      ...Markup.keyboard([
-        ["🔍 Искать жертв", "❤️ Кто лайкнул"],
-        ["🆕 Новое убожество", "📞 Дядя Гофман"],
-        ["📢 Наш канал"]
-      ]).resize()
-    });
-  } catch {
-    await ctx.reply(
-      `${u.name}, ${u.age}\n${u.type}\n${u.city}\n\n${u.about}`,
-      Markup.keyboard([
-        ["🔍 Искать жертв", "❤️ Кто лайкнул"],
-        ["🆕 Новое убожество", "📞 Дядя Гофман"],
-        ["📢 Наш канал"]
-      ]).resize()
-    );
-  }
+  await ctx.replyWithPhoto(u.photo, {
+    caption: `👤 Твоя анкета:\n\n${u.name}, ${u.age}\n📍 ${u.city}\n\n${u.about}`,
+    ...Markup.keyboard([
+      ["🔍 Поиск", "❤️ Мои лайки"],
+      ["🆕 Новая анкета"]
+    ]).resize()
+  });
 });
 
-// 🆕 Новое убожество
-bot.hears("🆕 Новое убожество", async (ctx) => {
+// ===== НОВАЯ АНКЕТА =====
+bot.hears("🆕 Новая анкета", async (ctx) => {
   const userId = ctx.from.id;
-  
   await pool.query("DELETE FROM users WHERE id = $1", [userId]);
   await pool.query("DELETE FROM likes WHERE from_id = $1 OR to_id = $1", [userId]);
   
-  await ctx.reply("🔄 Создаем новое убожество. Поздняков вылез из коробки ради такого\n\nКак тебя зовут?");
+  ctx.reply("Создаем новую анкету. Как тебя зовут?");
   state[userId] = { step: "name" };
 });
 
-// 📞 Дядя Гофман
-bot.hears("📞 Дядя Гофман", async (ctx) => {
-  try {
-    await ctx.replyWithPhoto(SUPPORT_PHOTO, {
-      caption: `🛠 ДЯДЯ ГОФМАН НАЛИВАЕТ:\n\nНапиши @${SUPPORT_USERNAME}\n\nОн нальет\nПоздняков вылезет из коробки\nУбермаргинал закажет додо\nДжоджо Флойд задышит\n\nНо не факт\n\nНаш канал: ${CHANNEL_LINK}`,
-      ...Markup.keyboard([["🔙 Назад на дно"]]).resize()
-    });
-  } catch {
-    await ctx.reply(
-      `🛠 Дядя Гофман: @${SUPPORT_USERNAME}\n\nНаш канал: ${CHANNEL_LINK}`,
-      Markup.keyboard([["🔙 Назад на дно"]]).resize()
-    );
-  }
-});
-
-// 📢 Наш канал
-bot.hears("📢 Наш канал", async (ctx) => {
-  await ctx.reply(
-    `📢 НАШ КАНАЛ С ДНОМ:\n\n${CHANNEL_LINK}\n\nПодпишись, дебил, там Поздняков из коробки вещает, Убермаргинал додо пиццу жрет, Джоджо Флойд не дышит, Гофман наливает!`,
-    Markup.keyboard([["🔙 Назад на дно"]]).resize()
-  );
-});
-
-// 🔙 Назад
-bot.hears("🔙 Назад на дно", async (ctx) => {
-  await ctx.reply("Ты снова на дне. Поздняков машет из коробки:", mainMenu());
-});
-
-// 🔍 Искать жертв
-bot.hears("🔍 Искать жертв", async (ctx) => {
+// ===== ПОИСК =====
+bot.hears("🔍 Поиск", async (ctx) => {
   await searchProfiles(ctx);
 });
 
-// ❤️ Кто лайкнул
-bot.hears("❤️ Кто лайкнул", async (ctx) => {
+// ===== МОИ ЛАЙКИ =====
+bot.hears("❤️ Мои лайки", async (ctx) => {
   await showLikes(ctx);
 });
 
-// ➡️ Дальше
+// ===== ДАЛЬШЕ =====
 bot.hears("➡️ Дальше", async (ctx) => {
   await searchProfiles(ctx);
 });
 
-// ❤️ Лайк
+// ===== ЛАЙК =====
 bot.hears("❤️ Лайк", async (ctx) => {
   await sendLike(ctx);
 });
 
-// ===== ФУНКЦИИ =====
+// ===== НАЗАД =====
+bot.hears("🔙 Назад", async (ctx) => {
+  await ctx.reply("Главное меню:", mainMenu());
+});
 
-// Поиск анкет
+// ===== ПОИСК АНКЕТ =====
 async function searchProfiles(ctx) {
   const userId = ctx.from.id;
-  console.log(`✅ Поиск от ${userId}`);
   
   const me = await pool.query("SELECT * FROM users WHERE id = $1", [userId]);
   if (me.rows.length === 0) {
-    await ctx.reply("Сначала создай убожество. Поздняков без убожества в коробке сидит");
-    return;
+    state[userId] = { step: "name" };
+    return ctx.reply("Сначала создай анкету. Как тебя зовут?");
   }
   
+  // Ищем кого-то кроме себя
   const candidates = await pool.query(`
     SELECT * FROM users 
     WHERE id != $1 
@@ -337,106 +249,93 @@ async function searchProfiles(ctx) {
   `, [userId]);
   
   if (candidates.rows.length === 0) {
-    const randomSad = NO_PROFILES[Math.floor(Math.random() * NO_PROFILES.length)];
-    await ctx.reply(randomSad, mainMenu());
-    return;
+    return ctx.reply("😢 Пока никого нет. Заходи позже.", mainMenu());
   }
   
   const candidate = candidates.rows[0];
-  
-  // Сохраняем кто кому показывается (и для текущего лайка, и для ответного)
   currentView[userId] = candidate.id;
-  lastShown[userId] = candidate.id; // Сохраняем отдельно для ответных лайков
   
-  try {
-    await ctx.replyWithPhoto(candidate.photo, {
-      caption: `🔍 НАШЛАСЬ ЖЕРТВА:\n\n${candidate.name}, ${candidate.age}\n${candidate.type}\n📍 ${candidate.city}\n\n📝 ${candidate.about}\n\nПоздняков уже лезет в коробку к этой жертве`,
-      ...Markup.keyboard([
-        ["❤️ Лайк", "➡️ Дальше"],
-        ["🔙 Назад на дно"]
-      ]).resize()
-    });
-  } catch {
-    await ctx.reply(
-      `${candidate.name}, ${candidate.age}\n${candidate.type}\n${candidate.city}\n\n${candidate.about}`,
-      Markup.keyboard([
-        ["❤️ Лайк", "➡️ Дальше"],
-        ["🔙 Назад на дно"]
-      ]).resize()
-    );
-  }
+  await ctx.replyWithPhoto(candidate.photo, {
+    caption: `${candidate.name}, ${candidate.age}\n📍 ${candidate.city}\n\n${candidate.about}`,
+    ...Markup.keyboard([
+      ["❤️ Лайк", "➡️ Дальше"],
+      ["🔙 Назад"]
+    ]).resize()
+  });
 }
 
-// Лайк
+// ===== ЛАЙК =====
 async function sendLike(ctx) {
   const fromId = ctx.from.id;
-  
-  // Сначала проверяем currentView, потом lastShown
-  let toId = currentView[fromId] || lastShown[fromId];
+  const toId = currentView[fromId];
   
   if (!toId) {
-    return ctx.reply("Сначала найди жертву. Поздняков в коробке ищет, но пока только коробки");
+    return ctx.reply("Сначала найди кого-нибудь в поиске");
+  }
+  
+  // Проверяем на спам (5 минут)
+  const likeKey = `${fromId}_${toId}`;
+  const lastTime = lastLikeTime[likeKey];
+  const now = Date.now();
+  
+  if (lastTime && (now - lastTime) < 300000) {
+    const minutesLeft = Math.ceil((300000 - (now - lastTime)) / 60000);
+    return ctx.reply(`⏳ Ты уже лайкал. Подожди ${minutesLeft} мин.`);
   }
   
   try {
-    // Проверяем, не лайкал ли уже
+    // Проверяем в БД
     const existing = await pool.query(
-      "SELECT * FROM likes WHERE from_id = $1 AND to_id = $2",
+      "SELECT created_at FROM likes WHERE from_id = $1 AND to_id = $2",
       [fromId, toId]
     );
     
     if (existing.rows.length > 0) {
-      return ctx.reply("❌ Ты уже лайкал! Убермаргинал уже съел додо пиццу с пенивайзом, пока ты спамишь");
+      const likeTime = new Date(existing.rows[0].created_at).getTime();
+      if ((now - likeTime) < 300000) {
+        lastLikeTime[likeKey] = likeTime;
+        const minutesLeft = Math.ceil((300000 - (now - likeTime)) / 60000);
+        return ctx.reply(`⏳ Ты уже лайкал. Подожди ${minutesLeft} мин.`);
+      }
     }
     
     // Сохраняем лайк
     await pool.query(
-      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2)",
+      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
       [fromId, toId]
     );
     
-    console.log(`✅ Лайк от ${fromId} к ${toId} сохранен`);
+    // Запоминаем время
+    lastLikeTime[likeKey] = now;
     
-    const likeMessages = [
-      "✅ Лайк улетел! Поздняков вылез из коробки и зааплодировал",
-      "❤️ Лайк! Убермаргинал заказал додо пиццу с пенивайзом в честь этого",
-      "🎯 Есть! Джоджо Флойд: 'I CAN'T BREATHE' - но это от счастья",
-      "💕 Лайк! Гофман наливает всем по 100 грамм"
-    ];
-    await ctx.reply(likeMessages[Math.floor(Math.random() * likeMessages.length)]);
+    ctx.reply("✅ Лайк отправлен!");
     
-    // Отправляем уведомление тому, кого лайкнули
+    // Уведомление
     try {
-      const notification = LIKE_NOTIFICATIONS[Math.floor(Math.random() * LIKE_NOTIFICATIONS.length)];
-      await ctx.telegram.sendMessage(
-        toId, 
-        `${notification}\n\nЗайди в ❤️ Кто лайкнул посмотреть кто это!\n\nP.S. Можешь ответить взаимностью через 🔍 Искать жертв`
+      const likeCount = await pool.query(
+        "SELECT COUNT(*) FROM likes WHERE to_id = $1",
+        [toId]
       );
-      console.log(`✅ Уведомление отправлено ${toId}`);
-    } catch (err) {
-      console.log(`❌ Не удалось уведомить ${toId}: ${err.message}`);
-    }
+      
+      await ctx.telegram.sendMessage(
+        toId,
+        `❤️ Тебя лайкнули!\n\nВсего лайков: ${likeCount.rows[0].count}\n\nЗайди в "Мои лайки" посмотреть кто.`
+      );
+    } catch {}
     
-    // НЕ очищаем lastShown, чтобы можно было ответить на лайк
-    // Но currentView можно обновить для следующего поиска
-    if (currentView[fromId] === toId) {
-      // Если лайкнули текущего, то при следующем поиске покажем нового
-      currentView[fromId] = null;
-    }
-    
-    // Не показываем следующего автоматически, чтобы пользователь мог
-    // сам нажать "Дальше" или ответить на лайк
+    // Показываем следующего
+    await searchProfiles(ctx);
     
   } catch (err) {
-    console.log(`❌ Ошибка лайка: ${err.message}`);
-    ctx.reply("❌ Ошибка. Поздняков залез в коробку и плачет");
+    console.log("Ошибка лайка:", err);
+    ctx.reply("❌ Ошибка");
   }
 }
 
-// Кто лайкнул
-async function showLikes(ctx) {
+// ===== КТО ЛАЙКНУЛ =====
+async function showLikes(ctx, page = 0) {
   const userId = ctx.from.id;
-  console.log(`✅ Лайки от ${userId}`);
+  const pageSize = 1;
   
   const likes = await pool.query(`
     SELECT u.*, l.created_at FROM likes l
@@ -446,70 +345,93 @@ async function showLikes(ctx) {
   `, [userId]);
   
   if (likes.rows.length === 0) {
-    const randomSad = SAD_MESSAGES[Math.floor(Math.random() * SAD_MESSAGES.length)];
-    await ctx.reply(randomSad, mainMenu());
-    return;
+    return ctx.reply("😢 Тебя никто не лайкал", mainMenu());
   }
   
-  await ctx.reply(`❤️ ТЕБЯ ЛАЙКНУЛИ ${likes.rows.length} РАЗ:\n\nПоздняков вылез из коробки от удивления!`);
+  if (page < 0) page = 0;
+  if (page >= likes.rows.length) page = likes.rows.length - 1;
   
-  for (const user of likes.rows) {
-    const date = new Date(user.created_at).toLocaleDateString();
-    try {
-      await ctx.replyWithPhoto(user.photo, {
-        caption: `${user.name}, ${user.age}\n${user.type}\n📍 ${user.city}\n\nЛайкнул: ${date}\n\nЧтобы ответить взаимностью, найди его в 🔍 Искать жертв`,
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback('❤️ Ответить лайком', `like_${user.id}`)]
-        ])
-      });
-    } catch {
-      await ctx.reply(
-        `${user.name}, ${user.age}\n${user.type}\n📍 ${user.city}\nЛайкнул: ${date}`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('❤️ Ответить лайком', `like_${user.id}`)]
-        ])
-      );
-    }
+  const user = likes.rows[page];
+  const date = new Date(user.created_at).toLocaleDateString();
+  
+  const buttons = [];
+  const navButtons = [];
+  
+  if (page > 0) {
+    navButtons.push(Markup.button.callback('⬅️', `likes_${page - 1}`));
+  }
+  navButtons.push(Markup.button.callback(`${page + 1}/${likes.rows.length}`, 'noop'));
+  if (page < likes.rows.length - 1) {
+    navButtons.push(Markup.button.callback('➡️', `likes_${page + 1}`));
   }
   
-  await ctx.reply("👆 Вот эти уроды. Джоджо Флойд: 'I CAN FINALLY BREATHE'", mainMenu());
+  buttons.push(navButtons);
+  buttons.push([Markup.button.callback('❤️ Лайк в ответ', `like_${user.id}`)]);
+  buttons.push([Markup.button.callback('🔙 В меню', 'back_menu')]);
+  
+  await ctx.replyWithPhoto(user.photo, {
+    caption: `${user.name}, ${user.age}\n📍 ${user.city}\n\nЛайкнул: ${date}`,
+    ...Markup.inlineKeyboard(buttons)
+  });
 }
 
-// ===== INLINE КНОПКИ ДЛЯ ОТВЕТНЫХ ЛАЙКОВ =====
+// ===== INLINE КНОПКИ =====
+bot.action(/likes_(\d+)/, async (ctx) => {
+  const page = parseInt(ctx.match[1]);
+  await ctx.deleteMessage();
+  await showLikes(ctx, page);
+});
+
+bot.action('noop', async (ctx) => {
+  await ctx.answerCbQuery();
+});
+
 bot.action(/like_(\d+)/, async (ctx) => {
   const fromId = ctx.from.id;
   const toId = parseInt(ctx.match[1]);
   
-  // Проверяем, не лайкал ли уже
+  const likeKey = `${fromId}_${toId}`;
+  const lastTime = lastLikeTime[likeKey];
+  const now = Date.now();
+  
+  if (lastTime && (now - lastTime) < 300000) {
+    const minutesLeft = Math.ceil((300000 - (now - lastTime)) / 60000);
+    await ctx.answerCbQuery(`⏳ Подожди ${minutesLeft} мин.`, { show_alert: true });
+    return;
+  }
+  
   const existing = await pool.query(
-    "SELECT * FROM likes WHERE from_id = $1 AND to_id = $2",
+    "SELECT created_at FROM likes WHERE from_id = $1 AND to_id = $2",
     [fromId, toId]
   );
   
   if (existing.rows.length > 0) {
-    await ctx.answerCbQuery('❌ Ты уже лайкал этого урода!');
-    return;
+    const likeTime = new Date(existing.rows[0].created_at).getTime();
+    if ((now - likeTime) < 300000) {
+      lastLikeTime[likeKey] = likeTime;
+      const minutesLeft = Math.ceil((300000 - (now - likeTime)) / 60000);
+      await ctx.answerCbQuery(`⏳ Уже лайкал. Подожди ${minutesLeft} мин.`, { show_alert: true });
+      return;
+    }
   }
   
-  // Сохраняем ответный лайк
   await pool.query(
-    "INSERT INTO likes (from_id, to_id) VALUES ($1, $2)",
+    "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     [fromId, toId]
   );
   
-  console.log(`✅ Ответный лайк от ${fromId} к ${toId}`);
+  lastLikeTime[likeKey] = now;
   
   await ctx.answerCbQuery('✅ Лайк отправлен!');
   
-  // Отправляем уведомление
   try {
-    await ctx.telegram.sendMessage(
-      toId,
-      `🔥 ТЕБЕ ОТВЕТИЛИ ВЗАИМНОСТЬЮ!\n\nКто-то из твоих лайков лайкнул тебя в ответ! Зайди в ❤️ Кто лайкнул посмотреть.`
-    );
+    await ctx.telegram.sendMessage(toId, "❤️ Тебя лайкнули в ответ!");
   } catch {}
-  
-  await ctx.reply('✅ Лайк отправлен! Гофман наливает за взаимность!');
+});
+
+bot.action('back_menu', async (ctx) => {
+  await ctx.deleteMessage();
+  await ctx.reply("Главное меню:", mainMenu());
 });
 
 // ===== СОЗДАНИЕ АНКЕТЫ =====
@@ -517,7 +439,7 @@ bot.on("text", async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text;
   
-  if (["🔍 Искать жертв", "❤️ Кто лайкнул", "👤 Мой профиль", "📞 Дядя Гофман", "🔙 Назад на дно", "🆕 Новое убожество", "➡️ Дальше", "❤️ Лайк", "Москва", "ЗаМКАДье", "📢 Наш канал"].includes(text)) {
+  if (["🔍 Поиск", "❤️ Мои лайки", "👤 Профиль", "🔙 Назад", "🆕 Новая анкета", "➡️ Дальше", "❤️ Лайк", "Москва", "ЗаМКАДье"].includes(text)) {
     return;
   }
   
@@ -528,60 +450,47 @@ bot.on("text", async (ctx) => {
   try {
     if (s.step === "name") {
       if (text.length < 2 || text.length > 30) {
-        return ctx.reply("Имя должно быть от 2 до 30 символов. Поздняков в коробке столько не высидит");
+        return ctx.reply("Имя должно быть от 2 до 30 символов");
       }
       s.name = text;
       s.step = "age";
-      const randomAge = PROFILE_CREATION.age[Math.floor(Math.random() * PROFILE_CREATION.age.length)];
-      return ctx.reply(randomAge);
+      return ctx.reply("Сколько тебе лет? (14-99)");
     }
     
     if (s.step === "age") {
       const age = parseInt(text);
       if (isNaN(age) || age < 14 || age > 99) {
-        return ctx.reply("Напиши число от 14 до 99. Поздняков в коробке и то старше тебя");
+        return ctx.reply("Введи число от 14 до 99");
       }
       s.age = age;
-      s.step = "type";
-      return ctx.reply("Ты кто по жизни?", Markup.keyboard([
-        ["🧔 Инцел (дно)"],
-        ["👩 Фемцел (тоже дно)"]
-      ]).resize());
-    }
-    
-    if (s.step === "type") {
-      if (!text.includes("Инцел") && !text.includes("Фемцел")) {
-        return ctx.reply("Выбери из кнопок. Убермаргинал выбирает додо пиццу, а ты выбирай тип");
-      }
-      s.type = text;
       s.step = "city";
-      return ctx.reply("Откуда ты?", Markup.keyboard([
-        ["Москва (дно)"],
-        ["ЗаМКАДье (глубокое дно)"]
+      return ctx.reply("Твой город?", Markup.keyboard([
+        ["Москва"],
+        ["ЗаМКАДье"]
       ]).resize());
     }
     
     if (s.step === "city") {
       if (!text.includes("Москва") && !text.includes("ЗаМКАДье")) {
-        return ctx.reply("Выбери из кнопок. Гофман из Караганды, но ему похуй");
+        return ctx.reply("Выбери из кнопок");
       }
       s.city = text;
       s.step = "about";
-      return ctx.reply("Расскажи о себе. Поздняков рассказывает коробкам, Убермаргинал рассказывает додо пицце, Джоджо Флойд рассказал полу, Гофман рассказывает бутылке\n\nА ты че расскажешь?", Markup.removeKeyboard());
+      return ctx.reply("Напиши о себе:", Markup.removeKeyboard());
     }
     
     if (s.step === "about") {
       if (text.length < 5) {
-        return ctx.reply("Напиши хотя бы 5 символов. Поздняков и то больше коробок собрал");
+        return ctx.reply("Напиши хотя бы 5 символов");
       }
       s.about = text;
       s.step = "photo";
-      return ctx.reply("Отправь фото. Можно с коробкой как Поздняков, можно с додо пиццей как Убермаргинал, можно лежа как Джоджо Флойд, можно с бутылкой как Гофман");
+      return ctx.reply("Отправь фото:");
     }
     
   } catch (err) {
-    console.log(`❌ Ошибка: ${err.message}`);
-    ctx.reply("Что-то сломалось. Поздняков упал с коробки. Начни заново с /start");
+    console.log("Ошибка:", err);
+    ctx.reply("Ошибка. Начни заново с /start");
     delete state[userId];
   }
 });
@@ -597,30 +506,49 @@ bot.on("photo", async (ctx) => {
   
   try {
     await pool.query(
-      `INSERT INTO users (id, name, age, type, city, about, photo, username) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [userId, s.name, s.age, s.type, s.city, s.about, fileId, ctx.from.username]
+      `INSERT INTO users (id, name, age, city, about, photo, username) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [userId, s.name, s.age, s.city, s.about, fileId, ctx.from.username]
     );
     
     delete state[userId];
+    ctx.reply("✅ Анкета создана!", mainMenu());
     
-    await ctx.reply(
-      "✅ УБОЖЕСТВО СОЗДАНО!\n\n" +
-      "Поздняков: 'ПОЛЕЗАЙ В КОРОБКУ'\n" +
-      "Убермаргинал: 'ДОДО ПИЦЦА С ПЕНИВАЙЗОМ'\n" +
-      "Джоджо Флойд: *лежит*\n" +
-      "Гофман: 'НА, ВЫПЕЙ'\n\n" +
-      `Наш канал: ${CHANNEL_LINK}\n\n` +
-      "Теперь ищи таких же уродов!",
-      mainMenu()
-    );
   } catch (err) {
-    console.log(`❌ Ошибка: ${err.message}`);
-    ctx.reply("❌ Ошибка. Поздняков залез в коробку и не вылезет");
+    console.log("Ошибка:", err);
+    ctx.reply("❌ Ошибка");
   }
+});
+
+// ===== АДМИНКА =====
+bot.command('stats', async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  
+  const users = await pool.query("SELECT COUNT(*) FROM users");
+  const likes = await pool.query("SELECT COUNT(*) FROM likes");
+  
+  ctx.reply(`👤 Пользователей: ${users.rows[0].count}\n❤️ Лайков: ${likes.rows[0].count}`);
+});
+
+bot.command('broadcast', async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  
+  const text = ctx.message.text.replace("/broadcast", "").trim();
+  if (!text) return ctx.reply("Напиши текст");
+  
+  const users = await pool.query("SELECT id FROM users");
+  let sent = 0;
+  
+  for (const user of users.rows) {
+    try {
+      await ctx.telegram.sendMessage(user.id, `📢 ${text}\n\n${CHANNEL_LINK}`);
+      sent++;
+    } catch {}
+  }
+  
+  ctx.reply(`✅ Отправлено: ${sent}/${users.rows.length}`);
 });
 
 // ===== ЗАПУСК =====
 bot.launch();
-console.log("🤖 Бот на дне запущен!");
-console.log(`📢 Канал: ${CHANNEL_LINK}`);
+console.log("✅ Бот запущен");
