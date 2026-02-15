@@ -39,7 +39,7 @@ async function initDB() {
     `);
     console.log("✅ Таблица users готова");
 
-    // Таблица лайков - добавили created_at
+    // Таблица лайков
     await pool.query(`
       CREATE TABLE IF NOT EXISTS likes (
         id SERIAL PRIMARY KEY,
@@ -51,16 +51,7 @@ async function initDB() {
     `);
     console.log("✅ Таблица likes готова");
 
-    // Проверяем, есть ли колонка created_at в существующей таблице
-    try {
-      await pool.query(`SELECT created_at FROM likes LIMIT 1`);
-      console.log("✅ Колонка created_at существует");
-    } catch {
-      // Если нет - добавляем
-      await pool.query(`ALTER TABLE likes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()`);
-      console.log("✅ Добавлена колонка created_at");
-    }
-
+    // Таблица подписок
     await pool.query(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         user_id BIGINT PRIMARY KEY,
@@ -345,7 +336,7 @@ async function sendLike(ctx) {
     }
     
     await pool.query(
-      "INSERT INTO likes (from_id, to_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING",
+      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
       [fromId, toId]
     );
     
@@ -378,11 +369,13 @@ async function showLikes(ctx, page = 0) {
   const userId = ctx.from.id;
   
   try {
+    // Исправленный запрос - убираем l.id, используем created_at для сортировки
     const likes = await pool.query(`
-      SELECT u.*, l.created_at FROM likes l
+      SELECT u.*, l.created_at 
+      FROM likes l
       JOIN users u ON u.id = l.from_id
       WHERE l.to_id = $1
-      ORDER BY l.id DESC
+      ORDER BY l.created_at DESC
     `, [userId]);
     
     if (likes.rows.length === 0) {
@@ -446,33 +439,38 @@ bot.action(/like_(\d+)/, async (ctx) => {
     return;
   }
   
-  const existing = await pool.query(
-    "SELECT created_at FROM likes WHERE from_id = $1 AND to_id = $2",
-    [fromId, toId]
-  );
-  
-  if (existing.rows.length > 0) {
-    const likeTime = new Date(existing.rows[0].created_at).getTime();
-    if ((now - likeTime) < 300000) {
-      lastLikeTime[likeKey] = likeTime;
-      const minutesLeft = Math.ceil((300000 - (now - likeTime)) / 60000);
-      await ctx.answerCbQuery(`⏳ Уже лайкал. Подожди ${minutesLeft} мин.`, { show_alert: true });
-      return;
-    }
-  }
-  
-  await pool.query(
-    "INSERT INTO likes (from_id, to_id, created_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING",
-    [fromId, toId]
-  );
-  
-  lastLikeTime[likeKey] = now;
-  
-  await ctx.answerCbQuery('✅ Лайк отправлен!');
-  
   try {
-    await ctx.telegram.sendMessage(toId, "❤️ Тебя лайкнули в ответ!");
-  } catch {}
+    const existing = await pool.query(
+      "SELECT created_at FROM likes WHERE from_id = $1 AND to_id = $2",
+      [fromId, toId]
+    );
+    
+    if (existing.rows.length > 0) {
+      const likeTime = new Date(existing.rows[0].created_at).getTime();
+      if ((now - likeTime) < 300000) {
+        lastLikeTime[likeKey] = likeTime;
+        const minutesLeft = Math.ceil((300000 - (now - likeTime)) / 60000);
+        await ctx.answerCbQuery(`⏳ Уже лайкал. Подожди ${minutesLeft} мин.`, { show_alert: true });
+        return;
+      }
+    }
+    
+    await pool.query(
+      "INSERT INTO likes (from_id, to_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      [fromId, toId]
+    );
+    
+    lastLikeTime[likeKey] = now;
+    
+    await ctx.answerCbQuery('✅ Лайк отправлен!');
+    
+    try {
+      await ctx.telegram.sendMessage(toId, "❤️ Тебя лайкнули в ответ!");
+    } catch {}
+  } catch (err) {
+    console.error("Ошибка like action:", err);
+    await ctx.answerCbQuery('❌ Ошибка', { show_alert: true });
+  }
 });
 
 bot.action('back_menu', async (ctx) => {
@@ -646,7 +644,8 @@ bot.command('test', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   
   try {
-    await ctx.reply("✅ Бот работает!");
+    const users = await pool.query("SELECT COUNT(*) FROM users");
+    await ctx.reply(`✅ Бот работает!\n👤 Пользователей: ${users.rows[0].count}`);
   } catch (err) {
     await ctx.reply(`❌ Ошибка: ${err.message}`);
   }
@@ -655,3 +654,7 @@ bot.command('test', async (ctx) => {
 // ===== ЗАПУСК =====
 bot.launch();
 console.log("✅ Бот запущен");
+
+// Graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
